@@ -1,0 +1,909 @@
+/* ============================================
+   WorkBuddy 全局样式 — 参考 octopus-kaogong-workbench 设计语言
+   - 浅色 / 深色双主题
+   - 多强调色（accent）: emerald / ocean / iris / amber / sakura
+   - 玻璃感卡片 + 流体渐变 + 柔和阴影
+   ============================================ */
+
+:root {
+  color-scheme: light;
+
+  /* 强调色系统（HSL）— 浅色用极低保和，参考图清透水彩感 */
+  --accent-h: 202;
+  --accent-s: 46%;
+  --accent-soft-s: 34%;
+  --accent-rgb: 118 175 205;
+  --accent-50: hsl(var(--accent-h) var(--accent-soft-s) 97%);
+  --accent-100: hsl(var(--accent-h) var(--accent-soft-s) 91%);
+  --accent-200: hsl(var(--accent-h) 40% 84%);
+  --accent-300: hsl(var(--accent-h) 44% 72%);
+  --accent-400: hsl(var(--accent-h) var(--accent-s) 58%);
+  --accent-500: hsl(var(--accent-h) var(--accent-s) 48%);
+  --accent-600: hsl(var(--accent-h) 48% 38%);
+  --accent-700: hsl(var(--accent-h) 46% 30%);
+  --accent-800: hsl(var(--accent-h) 42% 23%);
+  --accent-900: hsl(var(--accent-h) 38% 16%);
+  --accent-foreground: #f7fbfd;
+  --accent-ink: hsl(var(--accent-h) 35% 22%);
+
+  /* 浅色主题 — 极淡冷灰白，去 accent 晕染 */
+  --bg: #f5f7fa;
+  --bg-grad:
+    radial-gradient(120% 80% at 50% -16%, rgba(142, 160, 178, 0.04), transparent 52%),
+    linear-gradient(180deg, #fafbfc 0%, #f5f7fa 58%, #eef1f5 100%);
+  --panel: rgba(255, 255, 255, 0.86);
+  --panel-solid: #ffffff;
+  --panel-2: #f8f9fb;
+  --panel-soft: #f0f2f5;
+  --border: rgba(15, 23, 42, 0.05);
+  --border-strong: rgba(15, 23, 42, 0.10);
+  --text: #4a5561;
+  --muted: #8b949d;
+
+  --primary: hsl(var(--accent-h) var(--accent-s) 58%);
+  --primary-2: hsl(var(--accent-h) 44% 72%);
+  --primary-soft: hsl(var(--accent-h) var(--accent-soft-s) 91% / 0.22);
+  --primary-soft-strong: hsl(var(--accent-h) var(--accent-soft-s) 91% / 0.34);
+  --primary-grad: linear-gradient(135deg, var(--accent-300) 0%, var(--accent-500) 100%);
+  --primary-glow: hsl(var(--accent-h) var(--accent-s) 58% / 0.16);
+  --glass-hi: rgba(255, 255, 255, 0.82);
+
+  --success: #10b981;
+  --success-soft: rgba(16, 185, 129, 0.12);
+  --success-grad: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  --warning: #f59e0b;
+  --warning-soft: rgba(245, 158, 11, 0.14);
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.12);
+  --danger-grad: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+
+  --radius: 18px;
+  --radius-sm: 12px;
+  --radius-xl: 24px;
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.03), 0 6px 18px rgba(15, 23, 42, 0.06);
+  --shadow-lg: 0 14px 40px rgba(15, 23, 42, 0.10);
+  --shadow-stack: 0 2px 5px rgba(15, 23, 42, 0.03), 0 8px 22px rgba(15, 23, 42, 0.05),
+    0 18px 40px rgba(15, 23, 42, 0.08);
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+}
+
+/* 强调色变体 */
+[data-accent="emerald"] {
+  --accent-h: 158;
+  --accent-s: 76%;
+  --accent-soft-s: 54%;
+  --accent-rgb: 35 226 160;
+  --accent-foreground: #f4fff9;
+  --accent-ink: hsl(158 70% 15%);
+}
+
+[data-accent="ocean"] {
+  --accent-h: 202;
+  --accent-s: 78%;
+  --accent-soft-s: 58%;
+  --accent-rgb: 42 169 232;
+  --accent-foreground: #f4fbff;
+  --accent-ink: hsl(202 70% 15%);
+}
+
+[data-accent="iris"] {
+  --accent-h: 263;
+  --accent-s: 68%;
+  --accent-soft-s: 50%;
+  --accent-rgb: 132 94 231;
+  --accent-foreground: #fbf8ff;
+  --accent-ink: hsl(263 70% 15%);
+}
+
+[data-accent="amber"] {
+  --accent-h: 36;
+  --accent-s: 84%;
+  --accent-soft-s: 62%;
+  --accent-rgb: 230 157 35;
+  --accent-300: hsl(36 80% 58%);
+  --accent-foreground: #fffaf0;
+  --accent-ink: #2b1b05;
+}
+
+[data-accent="sakura"] {
+  --accent-h: 344;
+  --accent-s: 76%;
+  --accent-soft-s: 56%;
+  --accent-rgb: 224 82 124;
+  --accent-foreground: #fff7fa;
+  --accent-ink: hsl(344 70% 15%);
+}
+
+/* 深色主题 — 参考 octopus 的 dark-ocean */
+/* 关键：深色完全自包含，所有 accent 变量显式声明，绝不继承浅色的低保和值，
+   否则流体卡渐变/项目卡辉光会被浅色 token 带灰（之前“深色被调淡”的根因）。 */
+[data-theme="dark"] {
+  color-scheme: dark;
+  /* 深色保持原有高饱和 accent，不被浅色低饱和 token 带跑 */
+  --accent-h: 202;
+  --accent-s: 78%;
+  --accent-soft-s: 58%;
+  --accent-rgb: 42 169 232;
+  --accent-50: hsl(202 58% 12%);
+  --accent-100: hsl(202 62% 16%);
+  --accent-200: hsl(202 70% 32%);
+  --accent-300: hsl(202 72% 56%);
+  --accent-400: hsl(202 78% 52%);
+  --accent-500: hsl(202 78% 44%);
+  --accent-600: hsl(202 74% 35%);
+  --accent-700: hsl(202 72% 27%);
+  --accent-800: hsl(202 66% 20%);
+  --accent-900: hsl(202 58% 13%);
+  --accent-foreground: #f4fbff;
+  --accent-ink: hsl(202 70% 15%);
+
+  --bg: #050706;
+  --bg-grad:
+    radial-gradient(circle at 50% -30%, rgba(37, 86, 65, .12), transparent 43%),
+    linear-gradient(90deg, #07100b 0, #020403 14%, #020302 86%, #07100b 100%);
+  --panel: rgba(17, 24, 21, 0.78);
+  --panel-solid: #0c1210;
+  --panel-2: #101714;
+  --panel-soft: #151c19;
+  --border: rgba(187, 210, 200, 0.14);
+  --border-strong: rgba(194, 217, 205, 0.22);
+  --text: #f5f7f6;
+  --muted: #8e9994;
+
+  --primary: hsl(var(--accent-h) var(--accent-s) 52%);
+  --primary-2: hsl(var(--accent-h) 72% 67%);
+  --primary-soft: hsl(var(--accent-h) var(--accent-soft-s) 54% / 0.13);
+  --primary-soft-strong: hsl(var(--accent-h) var(--accent-soft-s) 54% / 0.22);
+  --primary-grad: linear-gradient(135deg, var(--accent-300) 0%, var(--accent-500) 100%);
+  --primary-glow: hsl(var(--accent-h) var(--accent-s) 52% / 0.35);
+  --glass-hi: rgba(255, 255, 255, 0.07);
+
+  --success: hsl(158 76% 43%);
+  --success-soft: hsl(158 76% 43% / 0.12);
+  --success-grad: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  --warning: #f59e0b;
+  --warning-soft: hsl(36 84% 43% / 0.12);
+  --danger: #ff6c70;
+  --danger-soft: hsl(0 100% 71% / 0.12);
+  --danger-grad: linear-gradient(135deg, #ff6c70 0%, #dc2626 100%);
+
+  --shadow: inset 0 1px rgba(255, 255, 255, .025), 0 18px 48px rgba(0, 0, 0, .38);
+  --shadow-lg: inset 0 1px rgba(255, 255, 255, .03), 0 26px 70px rgba(0, 0, 0, .48);
+  --shadow-stack: 0 2px 6px rgba(0, 0, 0, .45), 0 10px 28px rgba(0, 0, 0, .45),
+    0 18px 48px rgba(0, 0, 0, .5);
+}
+
+/* ============================================================
+   皮肤（data-skin）：在深色 / 浅色「结构主题」之上叠加调色板变体。
+   因层叠顺序靠后者胜出，故置于 [data-theme] 与 [data-accent] 之后。
+   默认皮肤（dark / light）不设 data-skin，沿用原有行为，组件级
+   [data-theme="dark"/"light"] 覆盖继续生效，无需改动任何视图文件。
+   ============================================================ */
+
+[data-skin="glass"] {
+  /* 扒取自 glassmorphis 76% 仪表盘：暗色真玻璃 + 蓝青光晕 */
+  --accent-h: 217; --accent-s: 91%; --accent-soft-s: 60%;
+  --accent-rgb: 59 130 246;
+  --accent-50: hsl(217 60% 12%); --accent-100: hsl(217 64% 16%);
+  --accent-200: hsl(217 70% 32%); --accent-300: hsl(217 84% 60%);
+  --accent-400: hsl(217 91% 58%); --accent-500: hsl(217 91% 50%);
+  --accent-600: hsl(217 84% 40%); --accent-700: hsl(217 80% 30%);
+  --accent-800: hsl(217 74% 22%); --accent-900: hsl(217 64% 14%);
+  --accent-foreground: #eef4ff; --accent-ink: hsl(217 70% 15%);
+
+  --bg: #05080f;
+  --bg-grad:
+    radial-gradient(ellipse 85% 60% at 50% -18%, rgba(56,130,246,.30), transparent 55%),
+    radial-gradient(ellipse 60% 55% at 8% 115%, rgba(99,102,241,.18), transparent 55%),
+    linear-gradient(180deg, #0a1226 0%, #060a16 55%, #03050c 100%);
+  --surface: rgba(120,165,255,.05);
+  --panel: rgba(120,165,255,.08);
+  --panel-solid: #0c1426; --panel-2: rgba(120,165,255,.11); --panel-soft: rgba(120,165,255,.16);
+  --border: rgba(120,170,255,.18); --border-strong: rgba(150,195,255,.30);
+  --text: #e7eefb; --muted: #7c8db2;
+
+  --primary: hsl(217 91% 60%); --primary-2: hsl(217 84% 73%);
+  --primary-soft: hsl(217 70% 60% / .18); --primary-soft-strong: hsl(217 70% 60% / .30);
+  --primary-grad: linear-gradient(135deg, #60a5fa 0%, #3b82f6 55%, #6366f1 100%);
+  --primary-glow: hsl(217 91% 60% / .55); --glass-hi: rgba(180,210,255,.14);
+
+  --success: hsl(158 76% 55%); --success-soft: hsl(158 76% 55% / .18);
+  --success-grad: linear-gradient(135deg,#34d399 0%,#10b981 100%);
+  --warning: #f5b342; --warning-soft: hsl(40 88% 56% / .18);
+  --danger: #fb7185; --danger-soft: hsl(346 90% 70% / .18);
+  --danger-grad: linear-gradient(135deg,#fb7185 0%,#e11d48 100%);
+
+  --shadow: inset 0 1px rgba(160,200,255,.12), 0 18px 48px rgba(0,0,0,.55);
+  --shadow-lg: inset 0 1px rgba(160,200,255,.16), 0 26px 70px rgba(0,0,0,.62);
+  --shadow-stack: 0 2px 6px rgba(0,0,0,.5), 0 10px 28px rgba(0,0,0,.55), 0 18px 48px rgba(0,0,0,.6);
+}
+
+[data-skin="aurora"] {
+  /* 扒取自极光辉光图：黑底 + 青绿与品红双光晕 + 极光玻璃 */
+  --accent-h: 168; --accent-s: 80%; --accent-soft-s: 55%;
+  --accent-rgb: 45 212 191;
+  --accent-50: hsl(168 56% 13%); --accent-100: hsl(168 60% 17%);
+  --accent-200: hsl(168 66% 32%); --accent-300: hsl(168 78% 56%);
+  --accent-400: hsl(168 80% 52%); --accent-500: hsl(168 80% 44%);
+  --accent-600: hsl(168 76% 35%); --accent-700: hsl(168 72% 27%);
+  --accent-800: hsl(168 66% 20%); --accent-900: hsl(168 56% 13%);
+  --accent-foreground: #ecfffb; --accent-ink: hsl(168 70% 14%);
+
+  --bg: #04060f;
+  --bg-grad:
+    radial-gradient(ellipse 55% 55% at 14% -6%, rgba(45,212,191,.60), transparent 55%),
+    radial-gradient(ellipse 60% 55% at 90% 6%, rgba(232,121,249,.52), transparent 55%),
+    radial-gradient(ellipse 50% 42% at 50% 62%, rgba(99,102,241,.38), transparent 60%),
+    linear-gradient(135deg, #050811 0%, #0a0d22 100%);
+  --surface: rgba(255,255,255,.045);
+  --panel: rgba(255,255,255,.07);
+  --panel-solid: #0a0f22; --panel-2: rgba(255,255,255,.10); --panel-soft: rgba(255,255,255,.14);
+  --border: rgba(140,255,235,.16); --border-strong: rgba(255,150,240,.30);
+  --text: #eaf0fb; --muted: #8289b0;
+
+  --primary: hsl(168 80% 55%); --primary-2: hsl(168 76% 70%);
+  --primary-soft: hsl(168 70% 52% / .20); --primary-soft-strong: hsl(168 70% 52% / .32);
+  --primary-grad: linear-gradient(135deg, #2dd4bf 0%, #818cf8 50%, #e879f9 100%);
+  --primary-glow: hsl(285 90% 66% / .55); --glass-hi: rgba(200,255,245,.14);
+
+  --success: hsl(158 76% 55%); --success-soft: hsl(158 76% 55% / .18);
+  --success-grad: linear-gradient(135deg,#34d399 0%,#10b981 100%);
+  --warning: #f5b342; --warning-soft: hsl(40 88% 56% / .18);
+  --danger: #fb7185; --danger-soft: hsl(346 90% 70% / .18);
+  --danger-grad: linear-gradient(135deg,#fb7185 0%,#e11d48 100%);
+
+  --shadow: inset 0 1px rgba(200,255,245,.12), 0 18px 48px rgba(0,0,0,.55), 0 0 24px rgba(45,212,191,.18);
+  --shadow-lg: inset 0 1px rgba(200,255,245,.16), 0 26px 70px rgba(0,0,0,.62), 0 0 40px rgba(232,121,249,.22);
+  --shadow-stack: 0 2px 6px rgba(0,0,0,.5), 0 10px 28px rgba(0,0,0,.55), 0 18px 48px rgba(0,0,0,.6);
+}
+
+[data-skin="clean"] {
+  /* 扒取自极简浅白参考图：白底 + 白卡片 + 淡紫渐变光 + 靛蓝强调 */
+  --accent-h: 243; --accent-s: 75%; --accent-soft-s: 50%;
+  --accent-rgb: 99 102 241;
+  --accent-50: hsl(243 75% 97%); --accent-100: hsl(243 60% 94%);
+  --accent-200: hsl(243 60% 88%); --accent-300: hsl(243 70% 76%);
+  --accent-400: hsl(243 75% 64%); --accent-500: hsl(243 75% 56%);
+  --accent-600: hsl(243 70% 46%); --accent-700: hsl(243 65% 34%);
+  --accent-800: hsl(243 58% 24%); --accent-900: hsl(243 50% 16%);
+  --accent-foreground: #ffffff; --accent-ink: hsl(243 60% 22%);
+
+  /* 整页底色：淡蓝紫径向光 + 上下冷调渐变，模拟图片柔和背景 */
+  --bg: #eef0f7;
+  --bg-grad:
+    radial-gradient(ellipse 70% 50% at 18% -8%, rgba(165,180,252,.22), transparent 55%),
+    radial-gradient(ellipse 60% 45% at 88% 4%, rgba(196,181,253,.18), transparent 55%),
+    linear-gradient(180deg, #f4f5fb 0%, #eef0f7 55%, #e7eaf3 100%);
+  --surface: #ffffff;
+  --panel: #ffffff;
+  --panel-solid: #ffffff; --panel-2: #f6f7fb; --panel-soft: #eef0f4;
+  /* 边框更克制，更接近图片的"几乎看不见" */
+  --border: rgba(15,23,42,.06); --border-strong: rgba(15,23,42,.12);
+  --text: #1f2535; --muted: #6b7388;
+
+  --primary: hsl(243 75% 60%); --primary-2: hsl(243 70% 72%);
+  /* primary-soft 提强，让 active 项底色更显眼（对应图片里"Do"高亮态） */
+  --primary-soft: hsl(243 75% 92% / .55); --primary-soft-strong: hsl(243 80% 88% / .75);
+  --primary-grad: linear-gradient(135deg, #a5b4fc 0%, #6366f1 55%, #4f46e5 100%);
+  --primary-glow: hsl(243 75% 60% / .25); --glass-hi: rgba(255,255,255,.95);
+
+  --success: #10b981; --success-soft: rgba(16,185,129,.14);
+  --success-grad: linear-gradient(135deg,#34d399 0%,#10b981 100%);
+  --warning: #f59e0b; --warning-soft: rgba(245,158,11,.16);
+  --danger: #ef4444; --danger-soft: rgba(239,68,68,.14);
+  --danger-grad: linear-gradient(135deg,#ef4444 0%,#dc2626 100%);
+
+  /* 阴影更柔更浅，匹配图片里的"飘在白底上" */
+  --shadow: 0 1px 2px rgba(15,23,42,.04), 0 4px 14px rgba(99,102,241,.05);
+  --shadow-lg: 0 10px 32px rgba(99,102,241,.08);
+  --shadow-stack: 0 2px 5px rgba(15,23,42,.03), 0 6px 18px rgba(99,102,241,.05), 0 14px 36px rgba(99,102,241,.06);
+}
+
+/* 极简浅色下打通强调色调色盘：clean 固定靛蓝优先级低于显式 [data-accent]，
+   故用「皮肤 + 强调色」双属性选择器（特异性更高）让调色盘生效；
+   未命中时回落到上面 clean 默认的靛蓝，保持皮肤识别度。 */
+[data-skin="clean"][data-accent="emerald"] { --accent-h:158; --accent-s:76%; --accent-soft-s:54%; --accent-rgb:35 226 160; --accent-foreground:#f4fff9; --accent-ink:hsl(158 70% 15%); }
+[data-skin="clean"][data-accent="ocean"]   { --accent-h:202; --accent-s:78%; --accent-soft-s:58%; --accent-rgb:42 169 232; --accent-foreground:#f4fbff; --accent-ink:hsl(202 70% 15%); }
+[data-skin="clean"][data-accent="iris"]    { --accent-h:263; --accent-s:68%; --accent-soft-s:50%; --accent-rgb:132 94 231; --accent-foreground:#fbf8ff; --accent-ink:hsl(263 70% 15%); }
+[data-skin="clean"][data-accent="amber"]   { --accent-h:36; --accent-s:84%; --accent-soft-s:62%; --accent-rgb:230 157 35; --accent-300:hsl(36 80% 58%); --accent-foreground:#fffaf0; --accent-ink:#2b1b05; }
+[data-skin="clean"][data-accent="sakura"]  { --accent-h:344; --accent-s:76%; --accent-soft-s:56%; --accent-rgb:224 82 124; --accent-foreground:#fff7fa; --accent-ink:hsl(344 70% 15%); }
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-grad);
+  background-attachment: fixed;
+  color: var(--text);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background 0.25s ease, color 0.25s ease;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-solid);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  font-size: 13px;
+  transition: background 0.15s, border-color 0.15s, transform 0.05s, box-shadow 0.15s;
+}
+
+button:hover {
+  background: var(--panel-2);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button.primary {
+  background: var(--primary-grad);
+  border-color: transparent;
+  color: var(--accent-foreground);
+  box-shadow: 0 6px 18px var(--primary-glow);
+}
+
+button.primary:hover {
+  filter: brightness(1.08);
+}
+
+button.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+button.ghost:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.3);
+  background: var(--danger-soft);
+}
+
+button.danger:hover {
+  filter: brightness(0.95);
+}
+
+button.sm {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+button.docout-btn {
+  color: var(--accent-500);
+  border-color: var(--accent-500);
+  background: var(--primary-soft);
+}
+
+button.docout-btn:hover {
+  filter: brightness(1.08);
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-solid);
+  color: var(--text);
+  width: 100%;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 120px;
+  line-height: 1.6;
+}
+
+/* 基础玻璃面板 */
+.panel {
+  background: var(--panel);
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow), inset 0 1px 0 var(--glass-hi);
+  padding: 16px;
+}
+
+[data-theme="dark"] .panel {
+  background: linear-gradient(145deg, rgba(17, 24, 21, .97), rgba(8, 13, 11, .98));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .025), 0 24px 70px rgba(0, 0, 0, .35);
+}
+
+.grad-text {
+  background: var(--primary-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.panel-flat {
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tag {
+  display: inline-block;
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  margin: 2px 4px 2px 0;
+}
+
+/* 通用：图标按钮 */
+.icon-btn {
+  border: 1px solid var(--border-strong);
+  background: var(--panel-solid);
+  border-radius: 8px;
+  padding: 5px 9px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* 通用：标题区 */
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.3px;
+}
+
+.page-subtitle {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+/* 通用：chip 切换 */
+.chip {
+  border: 1px solid var(--border-strong);
+  background: var(--panel-solid);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chip.active {
+  background: var(--primary-soft-strong);
+  border-color: var(--primary);
+  color: var(--primary);
+  font-weight: 500;
+}
+
+/* 通知 toast */
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 320px;
+  max-width: 92vw;
+}
+
+.toast {
+  background: var(--panel-solid);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+}
+
+.toast.due {
+  border-left-color: var(--warning);
+}
+
+.toast-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  font-size: 14px;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.toast-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.snooze-sel {
+  padding: 4px 6px;
+}
+
+.snooze-num {
+  width: 60px;
+  padding: 4px 6px;
+}
+
+/* 通用 modal */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  z-index: 90;
+  padding: 6vh 16px;
+}
+
+[data-theme="dark"] .modal-mask {
+  background: rgba(0, 4, 3, 0.4);
+  backdrop-filter: blur(12px) saturate(.72);
+}
+
+.modal {
+  width: 100%;
+  max-width: 520px;
+  background: var(--panel);
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow-lg), inset 0 1px 0 var(--glass-hi);
+}
+
+[data-theme="dark"] .modal {
+  background: linear-gradient(145deg, rgba(28, 38, 34, .98), rgba(9, 15, 13, .99));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .05), 0 30px 100px rgba(0, 0, 0, .75);
+}
+
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.modal-head strong {
+  font-size: 16px;
+}
+
+/* =====================================================
+   流体渐变卡片（参考 octopus metric-card）
+   ===================================================== */
+.fluid-card {
+  --metric-lift: 0px;
+  --metric-scale: 1;
+  --flow-duration: 4s;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: var(--radius-xl);
+  border: 1px solid rgba(255, 255, 255, .14);
+  /* 静态阴影更克制，避免卡片连成一片；hover 时再明显抬起 */
+  box-shadow: inset 0 1px rgba(255, 255, 255, .08), 0 8px 22px rgba(0, 0, 0, .18);
+  transform: translateY(var(--metric-lift)) scale(var(--metric-scale));
+  transform-origin: 50% 70%;
+  will-change: transform;
+  transition: transform .42s cubic-bezier(.16, 1, .3, 1), border-color .32s ease, box-shadow .42s ease, filter .32s ease;
+}
+
+[data-theme="light"] .fluid-card {
+  border-color: rgba(255, 255, 255, .62);
+  box-shadow: inset 0 1px rgba(255, 255, 255, .7), 0 4px 14px rgba(15, 23, 42, .05);
+}
+
+.fluid-card::before {
+  content: "";
+  position: absolute;
+  inset: -27%;
+  z-index: -2;
+  filter: blur(24px);
+  opacity: .95;
+  transform-origin: 72% 54%;
+  animation: fluidDrift var(--flow-duration) cubic-bezier(.45, .05, .55, .95) infinite alternate;
+}
+
+.fluid-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 78% 18%, rgba(255, 255, 255, .24) 0 3%, transparent 27%),
+    radial-gradient(ellipse at 88% 10%, rgba(255, 255, 255, .1), transparent 35%),
+    linear-gradient(118deg, rgba(255, 255, 255, .09), transparent 36%, rgba(0, 0, 0, .22));
+  opacity: .78;
+  transition: opacity .3s ease;
+  pointer-events: none;
+}
+
+.fluid-card:hover {
+  --metric-lift: -6px;
+  --metric-scale: 1.015;
+  z-index: 4;
+  border-color: rgba(255, 255, 255, .34);
+  box-shadow: inset 0 1px rgba(255, 255, 255, .18), 0 26px 60px rgba(0, 0, 0, .45), 0 0 28px rgb(var(--accent-rgb) / .12);
+  filter: brightness(1.06) saturate(1.08);
+}
+
+[data-theme="light"] .fluid-card:hover {
+  box-shadow: inset 0 1px rgba(255, 255, 255, .8), 0 18px 40px rgba(15, 23, 42, .12), 0 0 24px rgb(var(--accent-rgb) / .10);
+  filter: brightness(1.02) saturate(1.02);
+}
+
+/* #6 仅修复右侧指标卡 hover 放大/上移导致溢出视口产生的上下/左右滚动条：
+   右栏卡片 hover 时取消位移与缩放（保留阴影/亮度等 hover 视觉），
+   避免卡片放大溢出到视口边缘触发滚动条；其他流体卡不受影响。 */
+.metrics .fluid-card:hover {
+  --metric-lift: 0px;
+  --metric-scale: 1;
+}
+
+/* 流体材质预设（浅色底）— 参考图极淡水彩 */
+.fluid-card[data-material="cyan"] {
+  color: #4a5561;
+  background: #f1f5f4;
+}
+
+.fluid-card[data-material="cyan"]::before {
+  background:
+    radial-gradient(circle at 76% 28%, rgba(132, 210, 200, .55) 0 12%, transparent 34%),
+    radial-gradient(circle at 45% 73%, rgba(142, 190, 205, .45) 0 11%, transparent 34%),
+    radial-gradient(circle at 25% 30%, rgba(160, 180, 195, .32) 0 10%, transparent 30%),
+    #eef4f3;
+}
+
+.fluid-card[data-material="original"] {
+  color: #4a5561;
+  background: #f4f3f5;
+}
+
+.fluid-card[data-material="original"]::before {
+  background:
+    radial-gradient(circle at 86% 36%, rgba(210, 145, 180, .46) 0 12%, transparent 35%),
+    radial-gradient(circle at 68% 78%, rgba(215, 175, 145, .42) 0 10%, transparent 34%),
+    radial-gradient(circle at 91% 20%, rgba(185, 155, 210, .38) 0 8%, transparent 30%),
+    #f3f1f5;
+}
+
+.fluid-card[data-material="rain"] {
+  color: #4a5561;
+  background: #f1f2f5;
+}
+
+.fluid-card[data-material="rain"]::before {
+  background:
+    radial-gradient(circle at 75% 70%, rgba(210, 150, 130, .44) 0 12%, transparent 36%),
+    radial-gradient(circle at 43% 24%, rgba(145, 165, 210, .46) 0 12%, transparent 35%),
+    radial-gradient(circle at 18% 74%, rgba(170, 150, 195, .38) 0 10%, transparent 35%),
+    #eef0f5;
+}
+
+.fluid-card[data-material="chrome"] {
+  color: #4a5561;
+  background: #f0f2f2;
+}
+
+.fluid-card[data-material="chrome"]::before {
+  background:
+    radial-gradient(circle at 74% 28%, rgba(230, 240, 240, .7) 0 10%, transparent 32%),
+    radial-gradient(circle at 47% 74%, rgba(165, 175, 175, .34) 0 12%, transparent 38%),
+    radial-gradient(circle at 22% 28%, rgba(130, 145, 145, .26) 0 9%, transparent 35%),
+    #edf0f0;
+}
+
+/* 深色主题下让流体卡更暗、更融入 */
+[data-theme="dark"] .fluid-card[data-material="cyan"] {
+  color: #f2f5f3;
+  background: #0a1512;
+}
+
+[data-theme="dark"] .fluid-card[data-material="cyan"]::before {
+  background:
+    radial-gradient(circle at 76% 28%, #14f2d0 0 12%, transparent 34%),
+    radial-gradient(circle at 45% 73%, #00a6b5 0 11%, transparent 34%),
+    radial-gradient(circle at 25% 30%, #092641 0 10%, transparent 30%),
+    #0c1815;
+}
+
+[data-theme="dark"] .fluid-card[data-material="original"] {
+  color: #f2f5f3;
+  background: #181218;
+}
+
+[data-theme="dark"] .fluid-card[data-material="original"]::before {
+  background:
+    radial-gradient(circle at 18% 50%, rgba(255, 108, 112, .55) 0 18%, transparent 45%),
+    radial-gradient(circle at 88% 50%, rgba(255, 255, 255, .34) 0 14%, transparent 42%),
+    #181218;
+}
+
+[data-theme="dark"] .fluid-card[data-material="rain"] {
+  color: #f2f5f3;
+  background: #0d1020;
+}
+
+[data-theme="dark"] .fluid-card[data-material="chrome"] {
+  color: #f2f5f3;
+  background: #111615;
+}
+
+/* 环境辉光（用于 3D 舞台底部） */
+.ambient-glow {
+  position: absolute;
+  z-index: 0;
+  left: 50%;
+  bottom: 8px;
+  width: 340px;
+  height: 70px;
+  transform: translateX(-50%);
+  background: rgb(var(--accent-rgb) / .3);
+  filter: blur(55px);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+[data-theme="light"] .ambient-glow {
+  background: rgb(var(--accent-rgb) / .10);
+  filter: blur(50px);
+}
+
+/* 玻璃抽屉/面板（参考 material-drawer） */
+.glass {
+  background: linear-gradient(145deg, rgba(28, 38, 34, .98), rgba(9, 15, 13, .99));
+  border: 1px solid rgba(255, 255, 255, .08);
+  box-shadow: inset 0 1px rgba(255, 255, 255, .05), 0 30px 100px rgba(0, 0, 0, .75);
+}
+
+[data-theme="light"] .glass {
+  background: linear-gradient(145deg, rgba(255, 255, 255, .96), rgba(248, 250, 252, .97));
+  border: 1px solid rgba(15, 23, 42, .06);
+  box-shadow: inset 0 1px rgba(255, 255, 255, .7), 0 18px 48px rgba(15, 23, 42, .08);
+}
+
+/* 关键帧 */
+@keyframes fluidDrift {
+  0% {
+    transform: translate(-2%, -2%) rotate(0deg) scale(1);
+  }
+  100% {
+    transform: translate(2%, 2%) rotate(6deg) scale(1.08);
+  }
+}
+
+@keyframes auraBreathe {
+  0%, 100% { opacity: .72; transform: scale(1); }
+  50% { opacity: .9; transform: scale(1.04); }
+}
+
+@keyframes groundBreathe {
+  0%, 100% { opacity: .55; transform: translateX(-50%) scaleX(1); }
+  50% { opacity: .72; transform: translateX(-50%) scaleX(1.06); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .55; transform: scale(.85); }
+}
+
+/* ============================================================
+   皮肤专属表面覆盖：置于文件末尾，以源码顺序压过
+   [data-theme="dark"] 对 .panel / .modal 写死的不透明深色背景，
+   让玻璃/极光真正半透、浅色用纯白卡。
+   默认皮肤（dark / light）不设 data-skin，永远不会命中这些规则，
+   故其外观完全不受影响。
+   ============================================================ */
+[data-skin="glass" i] .panel,
+[data-skin="glass" i] .modal,
+[data-skin="aurora" i] .panel,
+[data-skin="aurora" i] .modal {
+  background: var(--panel);
+  border-color: var(--border);
+  box-shadow: var(--shadow), inset 0 1px 0 var(--glass-hi);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  backdrop-filter: blur(22px) saturate(160%);
+}
+
+[data-skin="clean" i] .panel,
+[data-skin="clean" i] .modal {
+  background: var(--panel);
+  border-color: var(--border);
+  box-shadow: var(--shadow), inset 0 1px 0 var(--glass-hi);
+}
+
+/* view 根容器统一撑满 main 高度、且为 flex column（消除 main 内部 view 下方的留白"分层"）。
+   写在全局 style.css 而非 App.vue <style scoped>，因 scoped 选择器无法跨越 view 组件边界匹配子元素。 */
+.main > * {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+/* view 内最后一个直接子元素撑满 view 高度（防止 view 内部 panel 下方留白） */
+.main > * > *:last-child {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+}
+/* 显式列举 view 最后一个 panel：margin-top:auto 让它在 flex column 容器中撑到底 */
+.ov > .ov-shortcuts,
+.review > section:last-child,
+.docout > section:last-child,
+.tasks > section:last-child,
+.notes > section:last-child {
+  margin-top: auto !important;
+  flex: 0 1 auto !important;
+}
+/* 日历页：不要 fill 撑满，也不要 margin-top:auto 推空白，让 cal-wrap 自然高度（= 内容驱动），
+   配合 .duty-page 的 gap:14px 让 person-bar 和 cal-wrap 紧贴排列。
+   大 viewport 下日历下方到 main 底有空白区，跟 overview 页一致（右半部分布局也类似）。 */
+.duty-page > .cal-wrap {
+  flex: 0 1 auto !important;
+  min-height: 0 !important;
+}

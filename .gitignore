@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# build output (CI builds fresh every run)
+dist/
+dist-new/
+dist2/
+dist3/
+dist_clean/
+dist_verify/
+
+# vite temp cache
+vite.config.js.timestamp-*.mjs
+
+# scratch / leftover
+repro.mjs
+bridge2.txt
+
+# project memory / local state
+.workbuddy/
+
+# logs
+*.log
+.wb_pids.txt
+
+# scratch & backup artifacts (all prefixed with _)
+_*

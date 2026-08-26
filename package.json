@@ -1,0 +1,24 @@
+{
+  "name": "personal-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "本地优先的个人轻量工作台 (Vue3 + Dexie + Web Crypto)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "dexie": "^4.0.8",
+    "marked": "^12.0.2",
+    "vue": "^3.4.27",
+    "xlsx": "^0.18.5",
+    "xlsx-js-style": "^1.2.0",
+    "fflate": "^0.8.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "vite": "^5.2.11"
+  }
+}
