@@ -781,29 +781,31 @@ function trend(value, prev) {
   /* 用 !important 压过主题/皮肤层对 .layout 的列定义，确保真正单列（而非桌面三栏压缩进手机） */
   .layout {
     grid-template-columns: 1fr !important;
+    /* 顶栏自适应高度；main 占满剩余视口高（恢复桌面端已验证可用的“高度链”） */
+    grid-template-rows: auto minmax(0, 1fr) !important;
+    /* iPhone 刘海 / 状态栏安全区 */
     padding: 8px;
-    /* iPhone 刘海 / 状态栏与底部 Home 指示条安全区 */
     padding-top: calc(8px + env(safe-area-inset-top));
     padding-bottom: 0;
-    /* 移动端恢复文档流滚动：覆盖桌面端 .layout { height:100vh; overflow:hidden; grid-template-rows:minmax(0,1fr) }，避免整页被裁切 */
-    height: auto !important;
-    min-height: 100vh;
-    overflow: visible !important;
-    grid-template-rows: auto !important;
-    /* 关键：min-height:100vh + 默认 align-content:stretch 会把单行撑成 100vh，
-       导致 .main 变成 100vh 高、内部 .ov(flex:1;overflow:hidden) 锁死 → 顶部大片空白。
-       改为 start 让行高随内容，不再拉伸。 */
-    align-content: start !important;
-    /* 让出顶部 app bar 与底部 Tab 的空间 */
-    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+    /* 固定视口高 + 内部滚动：让各视图的 flex:1 / height:100% / overflow 机制原样工作，
+       彻底避免移动端内容塌陷为全白（之前 display:block 文档流破坏了高度假设，
+       且 Duty 等视图明确依赖 .main > * { flex:1 } 撑满高度） */
+    height: 100vh !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    align-content: stretch !important;
   }
-  /* 移动端：main 恢复内容高度，避免固定 100vh 与底部 Tab 冲突 */
+  /* 移动端：main 恢复桌面端 flex 列 + 固定高度，复用视图内部 flex:1 / overflow 滚动机制（内容必然显示） */
   .main {
-    display: block !important; /* 去掉桌面端 flex 拉伸，让内容自然撑开、页面滚动 */
-    height: auto !important;
-    overflow-y: visible !important;
+    display: flex !important;
+    flex-direction: column !important;
+    grid-row: 2 !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    overflow-y: auto !important;
     padding: 0 !important;
-    padding-bottom: calc(72px + env(safe-area-inset-bottom)) !important; /* 避让底部 Tab（FAB 已移除） */
+    /* 避让底部固定 Tab，避免内容被遮挡 */
+    padding-bottom: calc(72px + env(safe-area-inset-bottom)) !important;
     border: 0 !important;
     background: transparent !important;
     box-shadow: none !important;

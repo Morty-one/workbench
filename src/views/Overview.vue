@@ -1563,13 +1563,6 @@ async function onProjectsChanged() {
   }
 }
 @media (max-width: 768px) {
-  /* 移动端 .ov 不能 flex:1 拉伸（否则被 .main/网格撑成 100vh、overflow:hidden 锁死 → 顶部大片空白）；
-     改为自然高度 + 页面滚动 */
-  .ov {
-    flex: none !important;
-    min-height: 0 !important;
-    overflow: visible !important;
-  }
   .hero {
     flex-direction: column;
     align-items: flex-start;
@@ -1598,23 +1591,6 @@ async function onProjectsChanged() {
   /* 快捷入口：窄屏自适应列数，避免只显示 2 张且被裁切 */
   .sc-grid {
     grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
-  }
-  /* 还原文档流：撤销桌面依赖 flex/grid 高度假设，避免中间区块塌陷/被裁切 */
-  .ov-grid {
-    grid-template-columns: 1fr !important;
-    grid-template-rows: auto !important; /* 关键：原 minmax(0,1fr) 在无父高度时塌成 0，使中间区块消失 */
-    flex: none !important;
-    min-height: 0 !important;
-  }
-  .ov-todo,
-  .ov-proj {
-    height: auto !important;
-    overflow: visible !important; /* 取消 overflow:hidden 对内容的裁切 */
-  }
-  .todo-body {
-    flex: none !important;
-    overflow: visible !important;
-    max-height: none !important;
   }
 }
 
