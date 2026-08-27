@@ -1439,8 +1439,25 @@ watch(
 }
 @media (max-width: 720px) {
   .notes {
-    grid-template-columns: 1fr;
-    height: auto;
+    grid-template-columns: 1fr !important;
+    grid-template-rows: auto !important;
+    height: auto !important;
+  }
+  /* 移动端：目录侧栏改为整宽排在笔记列表上方（不再挤成竖排窄条）；
+     限制自身高度并内部滚动，避免吃掉整屏 */
+  .side {
+    grid-row: auto !important;
+    grid-column: 1 !important;
+    width: 100% !important;
+    align-self: auto !important;
+    max-height: 42vh;
+    overflow-y: auto !important;
+  }
+  .notes-main {
+    grid-row: auto !important;
+    grid-column: 1 !important;
+    height: auto !important;
+    overflow: visible !important;
   }
 }
 .side {

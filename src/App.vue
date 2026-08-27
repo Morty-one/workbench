@@ -440,7 +440,6 @@ function trend(value, prev) {
           <rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
           <rect x="3" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
         </svg>
-        <span>总览</span>
       </button>
     </header>
 
@@ -800,14 +799,20 @@ function trend(value, prev) {
     min-height: 100vh;
     overflow: visible !important;
     grid-template-rows: auto !important;
+    /* 关键：min-height:100vh + 默认 align-content:stretch 会把单行撑成 100vh，
+       导致 .main 变成 100vh 高、内部 .ov(flex:1;overflow:hidden) 锁死 → 顶部大片空白。
+       改为 start 让行高随内容，不再拉伸。 */
+    align-content: start !important;
     /* 让出顶部 app bar 与底部 Tab 的空间 */
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
   }
   /* 移动端：main 恢复内容高度，避免固定 100vh 与底部 Tab 冲突 */
   .main {
+    display: block !important; /* 去掉桌面端 flex 拉伸，让内容自然撑开、页面滚动 */
     height: auto !important;
     overflow-y: visible !important;
     padding: 0 !important;
+    padding-bottom: calc(88px + env(safe-area-inset-bottom)) !important; /* 给右下 FAB 让位，避免遮挡底部内容 */
     border: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
@@ -876,15 +881,22 @@ function trend(value, prev) {
   .nav {
     flex-direction: row !important;
     flex: 1;
-    justify-content: space-around !important;
+    justify-content: flex-start !important; /* 不再 space-around，保留 6 项自然宽度 */
     gap: 0 !important;
+    overflow-x: auto !important; /* 6 项放不下时横向滑动，而非折叠成 > */
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .nav::-webkit-scrollbar {
+    display: none;
   }
   .nav-item {
-    flex: 1;
+    flex: 0 0 auto; /* 不平均分配，按内容宽度排，溢出可滑 */
+    min-width: 60px;
     flex-direction: column;
     gap: 2px;
     font-size: 11px;
-    padding: 6px 2px !important;
+    padding: 6px 6px !important;
     border-radius: 10px;
     color: var(--muted, #888);
   }
