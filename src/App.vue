@@ -135,6 +135,13 @@ function toggleMetrics() {
   metricsCollapsed.value = !metricsCollapsed.value
 }
 watch(metricsCollapsed, (v) => localStorage.setItem('wb_metrics_collapsed', v ? '1' : '0'))
+// 移动端（≤720px）任务总览抽屉：默认隐藏，由右下角 FAB 调出（桌面端右侧栏在窄屏已被收起）
+const mobileMetricsOpen = ref(false)
+function toggleMobileMetrics() {
+  mobileMetricsOpen.value = !mobileMetricsOpen.value
+}
+// 移动端当前页标题（顶部 app bar 用）
+const currentTitle = computed(() => (navItems.find((n) => n.key === current.value) || {}).label || '工作台')
 // 指标栏悬浮按钮的显隐：仅在「任务总览」（右侧栏）感应区内才显示，离开即隐藏（#2）
 const metricsHover = ref(false)
 
@@ -422,7 +429,24 @@ function trend(value, prev) {
 </script>
 
 <template>
-  <div class="layout" :class="{ dark: theme === 'dark', 'metrics-collapsed': metricsCollapsed }">
+  <div class="layout" :class="{ dark: theme === 'dark', 'metrics-collapsed': metricsCollapsed, 'mobile-metrics-open': mobileMetricsOpen }">
+    <!-- 移动端顶部栏（仅 ≤720px 显示）：当前页标题 + 调出任务总览 -->
+    <header class="m-appbar">
+      <div class="m-title">{{ currentTitle }}</div>
+      <button class="m-appbar-action" @click="toggleMobileMetrics" title="任务总览">
+        <svg viewBox="0 0 24 24" width="18" height="18">
+          <rect x="3" y="13" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <rect x="14" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <rect x="3" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        </svg>
+        <span>总览</span>
+      </button>
+    </header>
+
+    <!-- 移动端任务总览遮罩（仅抽屉打开时） -->
+    <div v-if="mobileMetricsOpen" class="m-mask" @click="toggleMobileMetrics"></div>
+
     <!-- 左侧导航 -->
     <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
       <div class="brand">
@@ -611,6 +635,16 @@ function trend(value, prev) {
       </button>
     </div>
 
+    <!-- 移动端右下角 FAB：调出任务总览抽屉（仅 ≤720px 显示） -->
+    <button class="m-fab" @click="toggleMobileMetrics" title="任务总览">
+      <svg viewBox="0 0 24 24" width="22" height="22">
+        <rect x="3" y="13" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <rect x="14" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        <rect x="3" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
+      </svg>
+    </button>
+
     <!-- 紧凑提醒 toast -->
     <div class="toasts">
       <div v-for="toast in toasts" :key="toast.uid" class="toast" :class="toast.mode" @mouseenter="onToastEnter(toast)" @mouseleave="onToastLeave(toast)">
@@ -746,59 +780,171 @@ function trend(value, prev) {
     display: none;
   }
 }
+/* 移动端专属元素：默认（桌面）隐藏，仅在 ≤720px 出现 */
+.m-appbar,
+.m-fab,
+.m-mask {
+  display: none;
+}
+
 @media (max-width: 720px) {
+  /* 用 !important 压过主题/皮肤层对 .layout 的列定义，确保真正单列（而非桌面三栏压缩进手机） */
   .layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
     padding: 8px;
     /* iPhone 刘海 / 状态栏与底部 Home 指示条安全区 */
     padding-top: calc(8px + env(safe-area-inset-top));
     padding-bottom: 0;
     /* 移动端恢复文档流滚动：覆盖桌面端 .layout { height:100vh; overflow:hidden; grid-template-rows:minmax(0,1fr) }，避免整页被裁切 */
-    height: auto;
+    height: auto !important;
     min-height: 100vh;
-    overflow: visible;
-    grid-template-rows: auto;
+    overflow: visible !important;
+    grid-template-rows: auto !important;
+    /* 让出顶部 app bar 与底部 Tab 的空间 */
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
   }
   /* 移动端：main 恢复内容高度，避免固定 100vh 与底部 Tab 冲突 */
   .main {
-    height: auto;
-    overflow-y: visible;
+    height: auto !important;
+    overflow-y: visible !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
   }
+
+  /* 顶部 app bar：当前页标题 + 任务总览入口 */
+  .m-appbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 45;
+    height: calc(48px + env(safe-area-inset-top));
+    padding: calc(env(safe-area-inset-top)) 14px 0;
+    margin: -8px -8px 8px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(18px) saturate(150%);
+    -webkit-backdrop-filter: blur(18px) saturate(150%);
+  }
+  .m-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .m-appbar-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--border);
+    background: var(--surface, var(--panel));
+    color: var(--text);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+
+  /* 底部 Tab（复用左侧导航，改造为底部栏） */
   .sidebar {
-    position: fixed;
-    inset: auto 0 0 0;
+    position: fixed !important;
+    inset: auto 0 0 0 !important;
     z-index: 50;
-    flex-direction: row;
-    height: auto;
+    flex-direction: row !important;
+    height: auto !important;
     min-height: 60px;
-    border-radius: 16px 16px 0 0;
-    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
-    /* 覆盖桌面端 .sidebar 的 max-height/overflow，移动端底部 Tab 不应被限高或内部滚动 */
-    max-height: none;
-    overflow: visible;
+    border-radius: 16px 16px 0 0 !important;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom)) !important;
+    border-top: 1px solid var(--border) !important;
+    border-left: 0 !important;
+    border-right: 0 !important;
+    border-bottom: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    width: auto !important;
+    max-width: none !important;
+    align-self: auto !important;
+    box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.18) !important;
   }
-  .brand {
-    display: none;
+  .brand,
+  .sidebar-foot {
+    display: none !important;
   }
   .nav {
-    flex-direction: row;
+    flex-direction: row !important;
     flex: 1;
-    justify-content: space-around;
+    justify-content: space-around !important;
+    gap: 0 !important;
   }
   .nav-item {
+    flex: 1;
     flex-direction: column;
     gap: 2px;
     font-size: 11px;
-    padding: 6px;
+    padding: 6px 2px !important;
+    border-radius: 10px;
+    color: var(--muted, #888);
+  }
+  .nav-item.active {
+    color: var(--accent, #2aabe8);
+    background: color-mix(in srgb, var(--accent, #2aabe8) 12%, transparent);
+  }
+  .nav-ico {
+    width: 22px;
+    height: 22px;
   }
   .nav-label {
     font-size: 11px;
   }
-  .sidebar-foot {
-    display: none;
+
+  /* 右下角 FAB：调出任务总览抽屉 */
+  .m-fab {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    right: 16px;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    z-index: 55;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    border: 0;
+    color: #fff;
+    background: var(--accent, #2aabe8);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
   }
-  .main {
-    padding-bottom: calc(80px + env(safe-area-inset-bottom));
+
+  /* 任务总览抽屉（覆盖默认 ≤1100px 的 display:none） */
+  .m-mask {
+    display: block !important;
+    position: fixed;
+    inset: 0;
+    z-index: 58;
+    background: rgba(0, 0, 0, 0.4);
+  }
+  .layout.mobile-metrics-open .metrics {
+    display: flex !important;
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(86vw, 360px);
+    z-index: 60;
+    flex-direction: column;
+    gap: 12px;
+    padding: calc(16px + env(safe-area-inset-top)) 16px 16px;
+    overflow-y: auto;
+    background: var(--bg, #0b0f0d);
+    box-shadow: -10px 0 30px rgba(0, 0, 0, 0.3);
+    animation: m-sheet-in 0.2s ease;
+  }
+  @keyframes m-sheet-in {
+    from { transform: translateX(100%); }
+    to { transform: translateX(0); }
   }
 }
 

@@ -2633,4 +2633,26 @@ code {
   color: var(--primary);
   border-color: var(--primary);
 }
+/* 移动端（≤720px）：设置中心贴合手指操作 */
+@media (max-width: 720px) {
+  .page { gap: 10px; }
+  .data-block { padding: 12px; }
+  .top-tabs {
+    display: flex;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .top-tab { padding: 8px 14px; white-space: nowrap; flex: none; }
+  .cloud-block input[type='text'],
+  .cloud-block input[type='password'],
+  .cloud-block input:not([type]) {
+    font-size: 15px;
+    padding: 11px 12px;
+  }
+  .set-row { margin-bottom: 16px; }
+  .sync-item { padding: 10px 8px; }
+  .module-chip { padding: 8px 14px; font-size: 14px; }
+}
 </style>
