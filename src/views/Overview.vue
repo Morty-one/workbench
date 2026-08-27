@@ -1570,6 +1570,30 @@ async function onProjectsChanged() {
     flex-wrap: wrap;
     gap: 12px;
   }
+  /* hero-left 内部也列向化：greet/date + duty + notes 三个子项各占一行，
+     避免在 ≤768 屏上被横排列压在 ≤200px 宽的窄条里互相"挡"（之前用户看到的"笔记卡挤右上"
+     "hero 大空白"都是这一步没做引起的）。 */
+  .hero-left {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    width: 100%;
+    gap: 10px;
+  }
+  .hero-left-text,
+  .hero-duty,
+  .hero-notes {
+    width: 100%;
+    min-width: 0;
+    max-width: none !important; /* 覆盖 .hero-notes 的 max-width:280px，让它在小屏上全宽 */
+  }
+  .hero-notes {
+    /* 单列布局时不再固定竖直居中，改为内容自然撑高 */
+    align-self: stretch;
+    flex-wrap: wrap;
+  }
+  .hero-notes .hn-kb-btn {
+    align-self: flex-start; /* 按钮回到顶部自然位置（sticky 居中已无意义） */
+  }
   .hero-right {
     width: 100%;
     justify-content: flex-start;

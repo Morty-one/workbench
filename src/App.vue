@@ -804,8 +804,10 @@ function trend(value, prev) {
     height: 100% !important;
     overflow-y: auto !important;
     padding: 0 !important;
-    /* 避让底部固定 Tab，避免内容被遮挡 */
-    padding-bottom: calc(72px + env(safe-area-inset-bottom)) !important;
+    /* 避让底部固定 Tab，避免内容被遮挡。
+       底部 Tab 实高 ≈ 60（icon+label+padding 6） + iOS Home Indicator ≈ 34 ≈ 94；
+       设 96 留 2px 缓冲；env(safe-area-inset-bottom) 适配带物理 Home 键的机型（如 ±0 也兜底）。 */
+    padding-bottom: calc(96px + env(safe-area-inset-bottom)) !important;
     border: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
