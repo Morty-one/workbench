@@ -2637,12 +2637,24 @@ code {
 @media (max-width: 720px) {
   .page { gap: 10px; }
   .data-block { padding: 12px; }
+  /* 手机端：顶层 tab 与下方面板留间隔，避免"数据迁移"被"数据管理"标签压着（问题5） */
   .top-tabs {
     display: flex;
     width: 100%;
     max-width: 100%;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+    margin-bottom: 12px;
+  }
+  /* 手机端：预设子 tab（含"自动化"）与面板内容留间隔，避免被标签压着（问题6） */
+  .tabs {
+    margin-bottom: 14px;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--panel-solid);
+    padding-top: 4px;
+    padding-bottom: 10px;
   }
   .top-tab { padding: 8px 14px; white-space: nowrap; flex: none; }
   .cloud-block input[type='text'],

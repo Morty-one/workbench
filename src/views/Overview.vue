@@ -1616,6 +1616,31 @@ async function onProjectsChanged() {
   .sc-grid {
     grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
   }
+  /* 手机端：总览主体改为自然文档流，避免两栏叠压裁切（问题1） */
+  .ov {
+    overflow: visible !important;
+    height: auto !important;
+    flex: none !important;
+    min-height: 0 !important;
+  }
+  /* 单列后两区块各占一行自然撑高，不再被 minmax(0,1fr) 压扁 */
+  .ov-grid {
+    grid-template-rows: auto !important;
+  }
+  .ov-todo,
+  .ov-proj {
+    overflow: visible !important;
+    height: auto !important;
+    min-height: 0 !important;
+  }
+  .ov-todo .todo-body {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+  /* 手机端不显示项目文档，只聚焦今日要处理（问题3 用户要求） */
+  .ov-proj {
+    display: none !important;
+  }
 }
 
 </style>

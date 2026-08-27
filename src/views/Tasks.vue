@@ -206,6 +206,26 @@ const grouped = computed(() => {
   }
   return g
 })
+// 手机端四象限标签页：窄屏用 tab 切换，避免 2x2 挤成 2 行被裁切（问题4）
+const isNarrow = ref(false)
+if (typeof window !== 'undefined' && window.matchMedia) {
+  const mq = window.matchMedia('(max-width: 900px)')
+  isNarrow.value = mq.matches
+  mq.addEventListener('change', (e) => {
+    isNarrow.value = e.matches
+  })
+}
+const mobileQuadTab = ref(QUAD_LAYOUT[0])
+// 默认选中第一个有任务的象限（无任务的折叠为 tab 态，有任务的默认展开）
+watch(
+  grouped,
+  (g) => {
+    if (!isNarrow.value) return
+    const first = QUAD_LAYOUT.find((k) => (g[k] || []).length > 0)
+    if (first) mobileQuadTab.value = first
+  },
+  { immediate: true }
+)
 // 全部 / 范围筛选时，任务卡片上显示创建日期 YYYY-MM-DD
 const showCardDate = computed(() => dayMode.value === 'all' || dayMode.value === 'range')
 const displayKeys = computed(() => (focused.value ? [focused.value] : QUAD_LAYOUT))
@@ -1255,10 +1275,26 @@ onUnmounted(() => {
       </span>
     </div>
 
+    <!-- 手机端四象限标签（≤900px 显示，桌面隐藏，由 .filter 的 chip 负责） -->
+    <div class="quad-tabs" v-show="isNarrow">
+      <button
+        v-for="k in QUAD_LAYOUT"
+        :key="k"
+        class="quad-tab"
+        :class="{ active: mobileQuadTab === k }"
+        :style="{ '--qc': colors[k] || 'var(--primary)' }"
+        @click="mobileQuadTab = k"
+      >
+        <span>{{ QUAD[k] }}</span>
+        <span class="qt-count">{{ grouped[k].length }}</span>
+      </button>
+    </div>
+
     <div class="quad-grid" :class="{ single: focused }">
       <div
-        v-for="k in displayKeys"
+        v-for="k in QUAD_LAYOUT"
         :key="k"
+        v-show="isNarrow ? k === mobileQuadTab : displayKeys.includes(k)"
         class="quad panel-flat"
         :class="{ 'is-focused': focused === k }"
         :style="{ '--qc': colors[k] || 'var(--primary)' }"
@@ -2093,6 +2129,64 @@ onUnmounted(() => {
 @media (max-width: 900px) {
   .quad-grid {
     grid-template-columns: 1fr;
+  }
+  /* 手机端：四象限改标签页，避免 2x2 挤成 2 行被裁切（问题4） */
+  .filter {
+    display: none !important; /* 窄屏用 .quad-tabs 切换，不再需要全部/单象限 chip */
+  }
+  .quad-tabs {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    margin-bottom: 12px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .quad-tab {
+    flex: 1 1 0;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 9px 4px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .quad-tab.active {
+    background: var(--primary-soft);
+    color: var(--primary);
+    border-color: var(--primary);
+  }
+  .quad-tab .qt-count {
+    font-size: 11px;
+    font-weight: 700;
+    background: var(--panel-solid);
+    border-radius: 999px;
+    padding: 0 6px;
+    color: var(--muted);
+  }
+  .quad-tab.active .qt-count {
+    color: var(--primary);
+  }
+  .quad-grid {
+    display: block; /* 取消网格，单象限文档流 */
+  }
+  .quad {
+    display: flex !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+  .quad-list {
+    overflow: visible !important;
+    max-height: none !important;
   }
 }
 .quad {
