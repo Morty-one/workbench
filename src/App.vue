@@ -391,6 +391,8 @@ function onVisibility() {
 const globalSearch = ref('')
 
 onMounted(async () => {
+  // 防御性：确保任务总览抽屉在应用加载时默认关闭（移动端不应一进入就弹出）
+  mobileMetricsOpen.value = false
   applySkin()
   applyAccent()
   requestNotifyPermission()
