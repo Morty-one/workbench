@@ -634,16 +634,6 @@ function trend(value, prev) {
       </button>
     </div>
 
-    <!-- 移动端右下角 FAB：调出任务总览抽屉（仅 ≤720px 显示） -->
-    <button class="m-fab" @click="toggleMobileMetrics" title="任务总览">
-      <svg viewBox="0 0 24 24" width="22" height="22">
-        <rect x="3" y="13" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
-        <rect x="14" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
-        <rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
-        <rect x="3" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/>
-      </svg>
-    </button>
-
     <!-- 紧凑提醒 toast -->
     <div class="toasts">
       <div v-for="toast in toasts" :key="toast.uid" class="toast" :class="toast.mode" @mouseenter="onToastEnter(toast)" @mouseleave="onToastLeave(toast)">
@@ -781,7 +771,6 @@ function trend(value, prev) {
 }
 /* 移动端专属元素：默认（桌面）隐藏，仅在 ≤720px 出现 */
 .m-appbar,
-.m-fab,
 .m-mask {
   display: none;
 }
@@ -812,7 +801,7 @@ function trend(value, prev) {
     height: auto !important;
     overflow-y: visible !important;
     padding: 0 !important;
-    padding-bottom: calc(88px + env(safe-area-inset-bottom)) !important; /* 给右下 FAB 让位，避免遮挡底部内容 */
+    padding-bottom: calc(72px + env(safe-area-inset-bottom)) !important; /* 避让底部 Tab（FAB 已移除） */
     border: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
@@ -912,22 +901,17 @@ function trend(value, prev) {
     font-size: 11px;
   }
 
-  /* 右下角 FAB：调出任务总览抽屉 */
-  .m-fab {
-    display: flex !important;
-    align-items: center;
-    justify-content: center;
-    position: fixed;
-    right: 16px;
-    bottom: calc(76px + env(safe-area-inset-bottom));
-    z-index: 55;
-    width: 52px;
-    height: 52px;
-    border-radius: 50%;
-    border: 0;
-    color: #fff;
-    background: var(--accent, #2aabe8);
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  /* 问题③：手机端去除底部 Tab 的折叠/展开按钮（PC 端不变）。
+     强制底部 Tab 始终为展开态（显示文字），不受 PC 端 sidebarCollapsed 状态影响。 */
+  .nav-float-btn {
+    display: none !important;
+  }
+  .sidebar.collapsed .nav-label {
+    display: inline !important;
+  }
+  /* 指标栏在手机端恒为抽屉，桌面端的「收起后右侧展开按钮」在手机端无意义，隐藏 */
+  .metrics-edge-wrap {
+    display: none !important;
   }
 
   /* 任务总览抽屉（覆盖默认 ≤1100px 的 display:none） */
