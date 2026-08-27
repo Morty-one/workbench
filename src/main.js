@@ -10,4 +10,11 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => {})
   })
+  // 新版 SW 接管（clients.claim）后强制刷新一次，吃掉 standalone 旧白屏实例
+  let swRefreshing = false
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (swRefreshing) return
+    swRefreshing = true
+    location.reload()
+  })
 }
