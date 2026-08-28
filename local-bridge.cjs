@@ -7,7 +7,7 @@
  * host. We echo back a loopback/null origin as the CORS allow-list.
  */
 const http = require('http')
-const { exec } = require('child_process')
+const { exec, spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -83,12 +83,25 @@ function startOrchestrator(res, origin) {
   if (!fs.existsSync(ps)) { sendJson(res, 500, { ok: false, error: 'orchestrator script missing' }, origin); return }
   if (!fs.existsSync(job)) { sendJson(res, 400, { ok: false, error: 'no saved job' }, origin); return }
   try { fs.unlinkSync(resultPath()) } catch {}
-  const cmd = `cmd /c start "" powershell -NoProfile -ExecutionPolicy Bypass -File "${ps}" -Job "${job}"`
-  log('DOCOPEN', cmd)
-  exec(cmd, { windowsHide: false }, (err) => {
-    if (err) { log('DOCOPEN_FAIL', err.message); sendJson(res, 500, { ok: false, error: err.message }, origin) }
-    else sendJson(res, 200, { ok: true }, origin)
-  })
+  // 关键：doc-output.ps1 是长时间运行的 Excel/WPS 自动化（可能跑数分钟，且会弹窗）。
+  // 旧实现用 exec(..., cb) 启动，Node 会等子进程 stdio 关闭才回调发 200；而该 PowerShell
+  // 继承 cmd 管道且本身长时间运行，导致回调永不触发 → HTTP 响应永不发出 → 浏览器 "Failed to fetch"。
+  // 改用 spawn + detached + stdio:'ignore' + unref：子进程彻底脱离 Node 事件循环，
+  // 立即回 200（"已提交，本机执行中"），执行进度由网页轮询 /doc-output-status 跟踪。
+  const args = ['/c', 'start', '', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps, '-Job', job]
+  log('DOCOPEN', 'cmd ' + args.join(' '))
+  try {
+    const child = spawn('cmd.exe', args, {
+      windowsHide: false,   // 保留可见窗口，用户能看到 Excel/WPS 执行 + 宏文件框自动填路径
+      detached: true,       // 脱离父进程组
+      stdio: 'ignore'       // 不接管 stdio，避免 Node 等待管道 EOF
+    })
+    child.unref()           // 彻底解除对 Node 事件循环的引用，绝不阻塞 HTTP 响应
+    sendJson(res, 200, { ok: true }, origin)
+  } catch (e) {
+    log('DOCOPEN_FAIL', e.message)
+    sendJson(res, 500, { ok: false, error: e.message }, origin)
+  }
 }
 
 function submitDocOutput(payload, res, origin) {
@@ -237,7 +250,19 @@ const server = http.createServer((req, res) => {
   const origin = req.headers.origin || ''
   log('REQ', req.method, req.url, 'origin=', origin)
 
-  if (req.method === 'OPTIONS') { sendJson(res, 204, {}, origin); return }
+  if (req.method === 'OPTIONS') {
+    // 204 响应严格禁止带 body（RFC 7230）。若用 sendJson 写 '{}'，Chrome 在跨域
+    // 场景会判为 ERR_INVALID_HTTP_RESPONSE 并 reject 整个 fetch → "Failed to fetch"。
+    // 因此 OPTIONS 预检必须单独走「204 + 无 body + 显式 CORS 头」。
+    if (origin && isLocalOrigin(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin)
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    }
+    res.writeHead(204)
+    res.end()
+    return
+  }
 
   const url = (req.url || '').split('?')[0]
 
