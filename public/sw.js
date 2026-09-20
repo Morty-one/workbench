@@ -2,9 +2,11 @@
 // 作用：首次加载后缓存静态资源，支持离线 / 安装到桌面。
 // 策略：导航请求「网络优先 + Navigation Preload」（始终拉最新 index.html，避免旧 hash JS 导致白屏）；
 //       其余同源资源缓存优先。跨域请求（GitHub API 等）一律直连不缓存。
-// v5：① precache 改为非原子（单资源失败不再拖垮安装）② 开启 Navigation Preload（iOS 冷启动更稳）
-//     ③ 导航网络优先、后台刷新缓存，旧缓存仅作断网兜底 ④ 版本号 v5 清空 v1~v4 全部旧缓存
-const CACHE = 'wb-shell-v5'
+// v6：① precache 改为非原子（单资源失败不再拖垮安装）② 开启 Navigation Preload（iOS 冷启动更稳）
+//     ③ 导航网络优先、后台刷新缓存，旧缓存仅作断网兜底 ④ 版本号 v6 清空 v1~v5 全部旧缓存
+//     ⑤ 应用图标已还原为最初版（蓝底 + 白/浅蓝三横条 + 右下黄圆点），必须 bump 缓存名才能让已安装的
+//        PWA 丢弃旧的 icon-192/512/apple-touch-icon PNG，否则「缓存优先」会一直吐旧图标。
+const CACHE = 'wb-shell-v6'
 const PRECACHE = [
   './',
   './index.html',

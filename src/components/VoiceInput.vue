@@ -5,7 +5,6 @@
       class="voice-btn"
       :class="{ recording }"
       @click="toggle"
-      @mousedown.prevent
       :title="error || (recording ? '点击停止录音' : '点击开始语音输入')"
     >
       <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -15,8 +14,8 @@
         <line x1="8" y1="22" x2="16" y2="22"></line>
       </svg>
     </button>
-    <span v-if="interim" class="voice-interim">{{ interim }}</span>
-    <span v-if="error" class="voice-error">{{ error }}</span>
+    <span v-if="recording && interim" class="voice-state">{{ interim }}</span>
+    <span v-if="error" class="voice-error" :title="error">{{ error }}</span>
   </div>
 </template>
 
@@ -31,10 +30,17 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue', 'result'])
 
-let recognition = null
+// 原版实现：浏览器原生 Web Speech API（SpeechRecognition / webkitSpeechRecognition）。
+// 浏览器会把音频发到 Google 的服务做识别，所以国内使用时大概率报 network 错误。
 const recording = ref(false)
 const interim = ref('')
 const error = ref('')
+
+let recognition = null
+
+function getSR() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null
+}
 
 function toggle() {
   recording.value ? stop() : start()
@@ -42,7 +48,9 @@ function toggle() {
 
 function start() {
   if (recording.value) return
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+  error.value = ''
+  interim.value = ''
+  const SR = getSR()
   if (!SR) {
     error.value = '当前浏览器不支持语音识别，请使用 Edge 或 Chrome'
     return
@@ -56,15 +64,16 @@ function start() {
   recognition.lang = props.lang
   recognition.continuous = true
   recognition.interimResults = true
+
   recognition.onresult = (e) => {
     let finalText = ''
-    let temp = ''
+    let interimText = ''
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      const tr = e.results[i]
-      if (tr.isFinal) finalText += tr[0].transcript
-      else temp += tr[0].transcript
+      const r = e.results[i]
+      if (r.isFinal) finalText += r[0].transcript
+      else interimText += r[0].transcript
     }
-    interim.value = temp
+    interim.value = interimText
     if (finalText) {
       const base = String(props.modelValue || '')
       const needSep = base && !base.endsWith(' ') && !base.endsWith('\n')
@@ -74,34 +83,43 @@ function start() {
     }
   }
   recognition.onerror = (e) => {
-    if (e?.error === 'no-speech') return // 无语音输入，静默
-    if (e?.error === 'aborted') return
-    error.value = '语音识别错误：' + (e?.error || '未知')
-    stop()
+    const map = {
+      'network': '语音识别网络错误（浏览器到 Google 的连接被阻断，国内常见）',
+      'not-allowed': '麦克风权限被拒绝',
+      'audio-capture': '未检测到麦克风设备',
+      'no-speech': '未检测到语音',
+      'aborted': '识别已中止',
+      'language-not-supported': '当前语言不支持',
+      'service-not-allowed': '浏览器禁止使用语音识别服务'
+    }
+    error.value = map[e.error] || ('语音识别出错：' + (e.error || ''))
   }
   recognition.onend = () => {
     recording.value = false
     interim.value = ''
   }
+
   try {
     recognition.start()
     recording.value = true
-    error.value = ''
   } catch (e) {
-    error.value = '无法启动语音识别：' + (e?.message || '')
-    recognition = null
+    error.value = '启动语音识别失败：' + (e?.message || '')
     recording.value = false
   }
 }
 
 function stop() {
-  try { recognition?.stop() } catch (e) { /* ignore */ }
-  recognition = null
+  if (recognition) {
+    try { recognition.stop() } catch (e) {}
+  }
   recording.value = false
-  interim.value = ''
 }
 
-onUnmounted(stop)
+onUnmounted(() => {
+  if (recognition) {
+    try { recognition.abort() } catch (e) {}
+  }
+})
 </script>
 
 <style scoped>
@@ -141,9 +159,9 @@ onUnmounted(stop)
   0%, 100% { box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.35); }
   50% { box-shadow: 0 0 0 6px rgba(229, 72, 77, 0); }
 }
-.voice-interim {
+.voice-state {
   font-size: 12px;
-  color: var(--muted, #999);
+  color: var(--primary, #4f6ef2);
   font-style: italic;
   max-width: 200px;
   overflow: hidden;

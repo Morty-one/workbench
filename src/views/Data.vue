@@ -4,13 +4,18 @@ import { db } from '../db'
 import { encryptData, decryptData } from '../crypto'
 import { configureSync, forceSync } from '../autosync'
 import { isIOS } from '../env'
-import { configureCloud, configureSchedule, runSync, onCloudState, testCloudConnection, SYNC_MODULES } from '../sync/cloudsync'
+import { configureCloud, configureSchedule, runSync, onCloudState, testCloudConnection, getCloudState, SYNC_MODULES } from '../sync/cloudsync'
+import { loadSyncLog, clearSyncLog, SYNC_LOG_HEAD } from '../sync/synclog'
 import { ensureDefaultProject } from '../seed'
 import { SHIFT_OPTIONS, WEEKDAY_LABELS, weekdayText } from '../shift'
+import * as XLSX_NS from 'xlsx-js-style'
+import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate'
+
+// xlsx-js-style 是 CJS/UMD 包，Vite 的 interop 结果视打包方式而定，两种形态都兜住（同 DocOutput.vue）
+const XLSX = XLSX_NS && XLSX_NS.utils ? XLSX_NS : (XLSX_NS.default || XLSX_NS)
 
 const status = ref('')
 const settings = reactive({
-  defaultFollowUp: 60,
   quadrantColors: {
     'urgent-important': '#ef4444',
     'urgent-notimportant': '#f59e0b',
@@ -137,7 +142,16 @@ const newRuleRemindTime = ref('') // HH:MM，生成任务时作为当天提醒�
 const newRuleDocOutput = ref(false) // 是否关联「文档输出」：生成的任务到完成时间后提示手动执行文档输出
 const newRuleQuadrant = ref('noturgent-important')
 const newRuleRemark = ref('')
+const newRuleGenHour = ref(9) // 生成钟点：每天到达该钟点才生成；0 = 打开即生成；默认 9
 const newRuleLinks = ref([])
+// 触发频率：'weekly'=按星期；'monthly'=按月日期（半月=15号+月末等）
+const newRuleFreq = ref('weekly')
+// 每月触发的日期（1-31），如半月默认 [15, 31]（31 在 30 天月自动 clamp 到月末）
+const newRuleMonthDays = ref([])
+// 生成任务归属的项目 id；空 = 默认项目。若指向开启了「自动子项目」的父项目，则按生成日期挂载到对应周子项目
+const newRuleProjectId = ref(null)
+// 项目下拉选项（预设任务可挂载到指定项目 / 自动子项目）
+const projectOptions = ref([])
 // 规则内的子任务条目（数量不定，可动态增删；生成任务时一并带入）
 const newRuleSubtasks = ref([])
 function addSubtask() {
@@ -247,12 +261,12 @@ const TOP_TABS = [
   { key: 'data', label: '数据管理' },
   { key: 'preset', label: '预设' }
 ]
-// 预设下的子 TAB：任务 / 知识库 / 自动化 / 外观
-const currentTab = ref('tasks')
+// 预设下的子 TAB：默认进入「自动化」（任务/知识库/外观并列）
+const currentTab = ref('auto')
 const TABS = [
+  { key: 'auto', label: '自动化' },
   { key: 'tasks', label: '任务预设' },
   { key: 'notes', label: '知识库预设' },
-  { key: 'auto', label: '自动化' },
   { key: 'look', label: '外观' }
 ]
 
@@ -275,6 +289,8 @@ const syncPassword = ref('') // 加密密码（本地保存，与 IndexedDB 同�
 const cloudRepo = ref('')
 const cloudPat = ref('')
 const cloudPw = ref('')
+// 「编辑后自动推送」偏好仍读写（供后续恢复用），但总开关 AUTO_SYNC_FEATURES.autoPush = false
+// 已压制该行为，界面上暂不提供该开关（2026-09-20 用户定案：现在不要，后续需要再加）
 const cloudAutoPush = ref(true)
 const cloudTesting = ref(false)
 const cloudSyncing = ref(false)
@@ -303,15 +319,22 @@ async function saveCloudConfig() {
   await db.settings.put({ key: 'cloudPat', value: cloudPat.value.trim() })
   await db.settings.put({ key: 'cloudPw', value: cloudPw.value })
   await db.settings.put({ key: 'cloudAutoPush', value: cloudAutoPush.value })
-  await db.settings.put({ key: 'cloudModules', value: cloudModules.value || [] })
+  // ⚠️ 必须 toPlain：cloudModules 一旦从库里读回来就是响应式数组（Proxy），
+  // 而空数组是 truthy，`|| []` 不会短路成普通数组，Proxy 进 put 会抛
+  // DataCloneError「could not be cloned」，导致后面几项配置全部写不进去。
+  await db.settings.put({ key: 'cloudModules', value: toPlain(cloudModules.value || []) })
   await db.settings.put({ key: 'cloudScheduleOn', value: cloudScheduleOn.value })
   await db.settings.put({ key: 'cloudScheduleTime', value: cloudScheduleTime.value })
   applyCloudConfig()
   showSaveTip('云端同步配置已保存 ✓')
 }
 async function testCloud() {
-  if (!cloudRepo.value.trim() || !cloudPat.value.trim()) {
-    showSaveTip('请先填写仓库与 PAT', false)
+  // 缺什么就直说缺什么（原来合并成一句「请先填写仓库与 PAT」，只填了仓库时等于没说）
+  const miss = []
+  if (!cloudRepo.value.trim()) miss.push('云端仓库 owner/repo')
+  if (!cloudPat.value.trim()) miss.push('PAT 令牌')
+  if (miss.length) {
+    showSaveTip('还没填：' + miss.join('、'), false, 0)
     return
   }
   cloudTesting.value = true
@@ -319,15 +342,28 @@ async function testCloud() {
   try {
     applyCloudConfig()
     await testCloudConnection()
-    showSaveTip('连接成功 ✓ 仓库可访问')
+    showSaveTip('连接成功 ✓ GitHub 可访问，仓库权限正常')
   } catch (e) {
-    showSaveTip('连接失败：' + (e.message || e), false)
+    // 失败必须把真实原因原样写出来（连不上网络 / 401 / 403 / 404 / 被限流 / 超时 …），
+    // 且不自动消失 —— 不然用户还没读完提示就没了，又会以为「点了没反应」
+    showSaveTip('连接失败 —— ' + (e && e.message ? e.message : String(e)), false, 0)
   } finally {
     cloudTesting.value = false
+    refreshSyncLogs()
   }
 }
 async function manualCloudSync() {
   if (cloudSyncing.value) return
+  // 同步比测试连接多需要一项加密密码，缺项要指名道姓，否则报出来的是笼统的资源未配置
+  const miss = []
+  if (!cloudRepo.value.trim()) miss.push('云端仓库 owner/repo')
+  if (!cloudPat.value.trim()) miss.push('PAT 令牌')
+  if (!cloudPw.value) miss.push('云端加密密码')
+  if (miss.length) {
+    cloudLastResult.value = ''
+    cloudLastError.value = '还没填：' + miss.join('、')
+    return
+  }
   cloudSyncing.value = true
   cloudLastError.value = ''
   cloudLastResult.value = '同步中…'
@@ -338,13 +374,18 @@ async function manualCloudSync() {
       cloudLastResult.value = '远端较新，已整库还原，即将刷新页面…'
       setTimeout(() => location.reload(), 1200)
     } else {
-      cloudLastResult.value = '已推送 ✓'
+      // 如实回显 cloudsync 的判定结果（例如「本地较新（云端是旧快照），已推送本地 ✓」）。
+      // 原来一律写「已推送 ✓」，会把「推上去的到底是哪一份」这个关键信息吃掉。
+      cloudLastResult.value = getCloudState().lastResult || '已推送到云端 ✓'
     }
   } catch (e) {
-    cloudLastError.value = e.message || String(e)
+    // 失败原因（连不上 / 401 / 403 / 413 体积过大 / 解密失败 …）就写在按钮下方这行红字里，
+    // 常驻不自动消失；这里不再额外弹浮层，避免同一条消息出现两次
+    cloudLastError.value = e && e.message ? e.message : String(e)
     cloudLastResult.value = ''
   } finally {
     cloudSyncing.value = false
+    refreshSyncLogs()
   }
 }
 // 同步模块勾选：cloudModules 为 null/空表示全选；勾选态 = 全选 或 包含该模块键
@@ -358,6 +399,128 @@ function toggleModule(key, on) {
   if (!on && i !== -1) cur.splice(i, 1)
   // 全部勾选时归并为 null（语义：全选，避免冗余存储）
   cloudModules.value = (cur.length === syncModules.length) ? null : cur
+}
+
+/* ===== 同步记录（localStorage，见 src/sync/synclog.js 顶部注释：不能写 IndexedDB）===== */
+const syncLogs = ref([])
+const syncLogPage = ref(1)
+const syncLogPageSize = ref(6)
+const syncLogPageSizeOpen = ref(false)
+
+function refreshSyncLogs() {
+  syncLogs.value = loadSyncLog()
+  // 记录变少（清空 / 换页大小）时把页码收回有效范围，避免停在空白页
+  if (syncLogPage.value > syncLogTotalPages.value) syncLogPage.value = syncLogTotalPages.value
+}
+function clearSyncLogs() {
+  if (!confirm('确定清空全部同步记录？此操作不影响云端与本地数据。')) return
+  clearSyncLog()
+  refreshSyncLogs()
+  showSaveTip('同步记录已清空')
+}
+const syncLogStats = computed(() => {
+  const total = syncLogs.value.length
+  const success = syncLogs.value.filter(l => l.ok).length
+  return { total, success, fail: total - success }
+})
+const syncLogTotalPages = computed(() => Math.max(1, Math.ceil(syncLogs.value.length / syncLogPageSize.value)))
+const pagedSyncLogs = computed(() => {
+  const start = (syncLogPage.value - 1) * syncLogPageSize.value
+  return syncLogs.value.slice(start, start + syncLogPageSize.value)
+})
+function setSyncLogPageSize(s) {
+  syncLogPageSize.value = s
+  syncLogPage.value = 1
+  syncLogPageSizeOpen.value = false
+}
+function fmtLogTime(ts) {
+  if (!ts) return '-'
+  const d = new Date(ts)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/* 导出 xlsx：列宽 / 边框 / 空串后处理与 DocOutput.vue「执行记录」导出保持同一套约定，
+   保证两份记录表格外观一致（列宽陷阱：SheetJS 会把 wch 再叠加 0.83203125 写进 <col width>）。 */
+const COL_K = 0.83203125
+const colW = (n) => ({ wch: n - COL_K })
+const XL_EDGE = { style: 'medium', color: { rgb: 'FF000000' } }
+const XL_BORDER = { top: XL_EDGE, bottom: XL_EDGE, left: XL_EDGE, right: XL_EDGE }
+
+function stripEmptyStringCells(buf) {
+  try {
+    const zip = unzipSync(new Uint8Array(buf))
+    const path = 'xl/worksheets/sheet1.xml'
+    if (!zip[path]) return buf
+    let xml = strFromU8(zip[path])
+    xml = xml.replace(/<c r="([A-Z]+\d+)" s="(\d+)" t="str"><v><\/v><\/c>/g, '<c r="$1" s="$2"/>')
+    zip[path] = strToU8(xml)
+    return zipSync(zip)
+  } catch (e) {
+    console.error('清空字符串单元格后处理失败', e)
+    return buf
+  }
+}
+
+function fmtFull(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+function exportSyncLogXlsx() {
+  if (!syncLogs.value.length) return
+  const titleLines = [
+    '云端同步执行记录',
+    '记录范围：测试连接 / 手动同步 / 每日定时同步（最多保留 200 条）',
+    '说明列：成功时为同步判定结果（推送 / 从云端还原 / 本地较新），失败时为真实失败原因'
+  ]
+  const head = SYNC_LOG_HEAD
+  const rows = syncLogs.value.map((l) => [
+    fmtFull(l.at),
+    fmtFull(l.endedAt),
+    l.triggerLabel,
+    l.ok ? '成功' : '失败',
+    l.ok ? (l.result || '') : (l.error || '')
+  ])
+  const aoa = [[titleLines.join('\n'), '', '', '', ''], head, ...rows]
+  const ws = XLSX.utils.aoa_to_sheet(aoa)
+  const lastRow = aoa.length - 1
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 4 } }]
+  ws['!cols'] = [colW(20), colW(20), colW(12), colW(8), colW(52)]
+  ws['!rows'] = [{ hpt: titleLines.length * 15 + 8 }]
+  for (let r = 0; r <= lastRow; r++) {
+    for (let c = 0; c < 5; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c })
+      let cell = ws[addr]
+      if (!cell) { cell = { t: 's', v: '' }; ws[addr] = cell }
+      cell.s = {
+        border: XL_BORDER,
+        alignment: r === 0
+          ? { horizontal: 'left', vertical: 'center', wrapText: true }
+          : r === 1
+            ? { horizontal: 'center', vertical: 'center', wrapText: true }
+            : { horizontal: c <= 3 ? 'center' : 'left', vertical: 'center', wrapText: c === 4 }
+      }
+    }
+  }
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: lastRow, c: 4 } })
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, '同步记录')
+  const buf = stripEmptyStringCells(XLSX.write(wb, { bookType: 'xlsx', type: 'array' }))
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  a.href = url
+  a.download = `云端同步记录_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.xlsx`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  showSaveTip('已导出 ' + syncLogs.value.length + ' 条同步记录 ✓')
 }
 function syncNow() {
   if (!dirHandle) return alert('请先选择数据目录。')
@@ -397,23 +560,37 @@ const flash = (msg, ms = 2500) => {
   setTimeout(() => (status.value = ''), ms)
 }
 
-// 设置中心「保存设置」按钮附近的局部提示（成功/失败均可见）
+// 页面级操作提示（浮层，任何 tab 下都可见 —— 见模板顶部注释）
+// ms 传 0 = 不自动消失：用于「为什么失败」这类必须读完再动手的文案，用户点一下关闭
 const saveTip = ref('')
 const saveTipOk = ref(true)
-function showSaveTip(msg, ok = true, ms = 3500) {
+let saveTipTimer = null
+function showSaveTip(msg, ok = true, ms) {
   saveTip.value = msg
   saveTipOk.value = ok
-  setTimeout(() => {
-    if (saveTip.value === msg) saveTip.value = ''
-  }, ms)
+  if (saveTipTimer) { clearTimeout(saveTipTimer); saveTipTimer = null }
+  const life = typeof ms === 'number' ? ms : (ok ? 2500 : 8000)
+  if (life > 0) {
+    saveTipTimer = setTimeout(() => {
+      if (saveTip.value === msg) saveTip.value = ''
+      saveTipTimer = null
+    }, life)
+  }
+}
+function dismissSaveTip() {
+  if (saveTipTimer) { clearTimeout(saveTipTimer); saveTipTimer = null }
+  saveTip.value = ''
 }
 
 onMounted(() => {
   loadSettings()
+  refreshSyncLogs()
   unsubCloudState = onCloudState((s) => {
     cloudLastAt.value = s.lastSyncAt
     cloudLastResult.value = s.lastResult
     cloudLastError.value = s.lastError
+    // 每次同步状态变化都刷新记录清单（测试连接也会有状态变化；失败时 lastError 非空同样能触发）
+    refreshSyncLogs()
   })
   // 点击多选组件外的任意区域 -> 收起所有下拉(人员/班次/周几)
   document.addEventListener('mousedown', onDocMouseDown)
@@ -429,8 +606,6 @@ function onDocMouseDown(e) {
   weekdayDropdownOpen.value = false
 }
 async function loadSettings() {
-  const d = await db.settings.get('defaultFollowUp')
-  if (d) settings.defaultFollowUp = d.value
   const c = await db.settings.get('quadrantColors')
   if (c) settings.quadrantColors = c.value
   const p = await db.settings.get('followUpPresets')
@@ -443,6 +618,8 @@ async function loadSettings() {
   if (pdt && Array.isArray(pdt.value)) {
     periodicDutyTasks.value = pdt.value.map((r) => migrateRule(r))
   }
+  // 预设任务「挂载到指定项目」下拉：加载全部项目（含父项目与自动生成的子项目）
+  projectOptions.value = (await db.projects.toArray()).sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
   loadDutyPersons()
   loadNoteFolders()
   const cp = await db.settings.get('currentPerson')
@@ -498,8 +675,13 @@ function migrateRule(r) {
     weekdays: [],
     shifts: [],
     url: '',
+    freq: 'weekly',
+    monthDays: [],
+    projectId: null,
     ...r
   }
+  if (migrated.freq !== 'monthly') migrated.freq = 'weekly'
+  if (!Array.isArray(migrated.monthDays)) migrated.monthDays = []
   // 旧规则用单 shift 字符串，新规则用 shifts 多选数组（空 = 不限）
   if (!Array.isArray(migrated.shifts)) {
     migrated.shifts = migrated.shift && migrated.shift !== '不限' ? [migrated.shift] : []
@@ -544,7 +726,6 @@ function toPlain(v) {
 }
 async function saveSettings() {
   try {
-    await db.settings.put({ key: 'defaultFollowUp', value: Number(settings.defaultFollowUp) })
     await db.settings.put({ key: 'quadrantColors', value: toPlain(settings.quadrantColors) })
     await db.settings.put({ key: 'followUpPresets', value: toPlain(presets.value) })
     await db.settings.put({ key: 'noteTags', value: toPlain(noteTags.value) })
@@ -659,6 +840,22 @@ function toggleNewShift(s) {
   if (ui >= 0) arr.splice(ui, 1)
   arr.push(s)
 }
+// 频率切换：每周/每月互斥（清除另一维度的选择）
+function setNewFreq(f) {
+  newRuleFreq.value = f
+  if (f === 'monthly') newRuleWeekdays.value = []
+  else newRuleMonthDays.value = []
+}
+// 每月日期多选（1-31）
+function toggleNewMonthDay(d) {
+  const i = newRuleMonthDays.value.indexOf(d)
+  if (i >= 0) newRuleMonthDays.value.splice(i, 1)
+  else newRuleMonthDays.value.push(d)
+}
+// 半月预设：15 号 + 月末（31 在 30 天月会自动 clamp 到月末）
+function applyHalfMonth() {
+  newRuleMonthDays.value = [15, 31]
+}
 // 规则的班次列表（兼容旧 shift 单值字段；空数组 = 不限）
 function ruleShiftsOf(r) {
   let arr = Array.isArray(r.shifts) ? r.shifts.filter(Boolean) : []
@@ -669,6 +866,15 @@ function ruleShiftText(r) {
   const arr = ruleShiftsOf(r)
   return arr.length ? arr.join(' / ') : '任意班次'
 }
+// 频率文案：按星期 / 按月日期
+function ruleFreqText(r) {
+  if (r.freq === 'monthly') {
+    const days = (r.monthDays || []).slice().sort((a, b) => a - b)
+    if (!days.length) return '每月（未选日期）'
+    return '每月 ' + days.join('、') + ' 号'
+  }
+  return weekdayText(r.weekdays)
+}
 // 规则条件的人话描述，列表里直接看得懂
 function ruleCondText(r) {
   const persons = Array.isArray(r.persons) && r.persons.length ? r.persons : r.person ? [r.person] : currentPerson.value ? [currentPerson.value] : ['当前用户']
@@ -676,16 +882,20 @@ function ruleCondText(r) {
   const shift = ruleShiftText(r)
   const dr = r.dateRange || {}
   const rangeText = dr.start || dr.end ? `${dr.start || '起'} ~ ${dr.end || '止'}` : ''
-  return `${weekdayText(r.weekdays)} · ${shift} · ${who}${rangeText ? ' · ' + rangeText : ''}`
+  const proj = r.projectId ? projectOptions.value.find((p) => p.id === r.projectId) : null
+  const projText = proj ? ` · 项目:${proj.name}` : ''
+  return `${ruleFreqText(r)} · ${shift} · ${who}${rangeText ? ' · ' + rangeText : ''}${projText}`
 }
 function previewText(r) {
   const who = Array.isArray(r.persons) && r.persons.length ? r.persons.join('、') : r.person || currentPerson.value || '当前用户'
   const shift = ruleShiftText(r)
-  const wd = weekdayText(r.weekdays)
+  const fr = r.freq === 'monthly' ? '每月 ' + ((r.monthDays || []).join('、') || '?') + ' 号' : weekdayText(r.weekdays)
   const dr = r.dateRange || {}
   const range = dr.start || dr.end ? `${dr.start || '起'}至${dr.end || '止'}` : ''
   const due = r.dueTime || '当日'
-  return `例：${shift} + ${wd}${range ? ' + ' + range : ''} → ${who} 在 ${due} 前完成「${r.title || '任务'}」。`
+  const proj = r.projectId ? projectOptions.value.find((p) => p.id === r.projectId) : null
+  const projText = proj ? `，归入「${proj.name}」` : ''
+  return `例：${shift} + ${fr}${range ? ' + ' + range : ''} → ${who} 在 ${due} 前完成「${r.title || '任务'}」${projText}。`
 }
 function normalizeUrl(u) {
   const s = (u || '').trim()
@@ -708,6 +918,12 @@ async function addRule() {
     title,
     persons: newRulePersons.value.slice(),
     weekdays: newRuleWeekdays.value.slice().sort((a, b) => a - b),
+    freq: newRuleFreq.value,
+    monthDays:
+      newRuleFreq.value === 'monthly'
+        ? newRuleMonthDays.value.filter((d) => d >= 1 && d <= 31).slice().sort((a, b) => a - b)
+        : [],
+    projectId: newRuleProjectId.value || null,
     shifts: newRuleShifts.value.filter((s) => s !== '不限').slice(),
     dateRange: {
       start: (newRuleDateRangeStart.value || '').trim(),
@@ -718,6 +934,10 @@ async function addRule() {
     docOutput: !!newRuleDocOutput.value,
     quadrant: newRuleQuadrant.value,
     remark: (newRuleRemark.value || '').trim(),
+    genHour: (() => {
+      const n = Number(newRuleGenHour.value)
+      return Number.isFinite(n) ? Math.max(0, Math.min(23, Math.floor(n))) : 9
+    })(),
     links: (newRuleLinks.value || [])
       .map((u) => (typeof u === 'string' ? { url: normalizeUrl(u), label: '打开' } : { url: normalizeUrl(u && u.url), label: (u && u.label) || '打开' }))
       .filter((l) => l.url),
@@ -758,6 +978,9 @@ function resetRuleForm() {
   newRulePersons.value = []
   newRuleWeekdays.value = []
   newRuleShifts.value = []
+  newRuleFreq.value = 'weekly'
+  newRuleMonthDays.value = []
+  newRuleProjectId.value = null
   newRuleDateRangeStart.value = ''
   newRuleDateRangeEnd.value = ''
   newRuleDueTime.value = ''
@@ -765,6 +988,7 @@ function resetRuleForm() {
   newRuleDocOutput.value = false
   newRuleQuadrant.value = 'noturgent-important'
   newRuleRemark.value = ''
+  newRuleGenHour.value = 9
   newRuleLinks.value = []
   newRuleSubtasks.value = []
   personDropdownOpen.value = false
@@ -779,6 +1003,9 @@ function startEditRule(raw) {
   newRulePersons.value = (r.persons || []).slice()
   newRuleWeekdays.value = (r.weekdays || []).slice().sort((a, b) => a - b)
   newRuleShifts.value = ruleShiftsOf(r).slice()
+  newRuleFreq.value = r.freq === 'monthly' ? 'monthly' : 'weekly'
+  newRuleMonthDays.value = Array.isArray(r.monthDays) ? r.monthDays.slice() : []
+  newRuleProjectId.value = r.projectId || null
   const dr = r.dateRange || { start: '', end: '' }
   newRuleDateRangeStart.value = dr.start || ''
   newRuleDateRangeEnd.value = dr.end || ''
@@ -787,6 +1014,7 @@ function startEditRule(raw) {
   newRuleDocOutput.value = !!r.docOutput
   newRuleQuadrant.value = r.quadrant || 'noturgent-important'
   newRuleRemark.value = r.remark || ''
+  newRuleGenHour.value = Number.isFinite(r.genHour) ? r.genHour : 9
   // 兼容旧规则的单链接 url/urlLabel，自动迁移为多链接
   const legacyLink = r.url ? [{ url: r.url, label: r.urlLabel || '打开' }] : []
   newRuleLinks.value = Array.isArray(r.links)
@@ -995,6 +1223,19 @@ async function clearAll() {
 
 <template>
   <div class="page">
+    <!-- 全局操作提示（浮层）
+         原实现把这条提示写在「预设 → 外观」tab 的 panel 里，且条件带 `currentTab === 'look'`，
+         但调用 showSaveTip 的有 20+ 处（保存配置 / 测试连接 / 规则 / 标签 / 笔记类型 / 预设…），
+         分布在 data / tasks / notes / auto / look 各个 tab 上 ⇒ 除外观 tab 外全部静默无反馈
+         （用户 9-20 反馈的「测试连接无反馈」就是这个）。改为页面级渲染，任何 tab 下都可见。
+         失败提示通过 ms=0 常留，读完后点一下即关。 -->
+    <div
+      v-if="saveTip"
+      class="save-tip"
+      :class="{ ok: saveTipOk, err: !saveTipOk }"
+      title="点击关闭"
+      @click="dismissSaveTip"
+    >{{ saveTip }}</div>
     <!-- 顶层分类：数据管理 / 预设 -->
     <div class="top-tabs">
       <button
@@ -1061,7 +1302,7 @@ async function clearAll() {
         <h4 class="block-title">云端同步（GitHub 私有库）</h4>
         <p class="muted">
           数据在 GitHub 私有库中以 <code>workbench-data-encrypted.json</code> 形式存储（本地 AES-GCM 加密后上传）。
-          打开应用时自动拉取，本地任何改动 3 秒后自动推送。手机端用同一套设置即可双向同步。
+          同步由「立即同步」按钮或每日定时同步触发。手机端用同一套设置即可双向同步。
         </p>
         <div class="cloud-form">
           <div class="set-row">
@@ -1077,17 +1318,6 @@ async function clearAll() {
             <input v-model="cloudPw" type="password" placeholder="与本机目录加密密码相互独立" />
           </div>
           <div class="sync-box" style="margin-top: 4px">
-            <label class="sync-item">
-              <input type="checkbox" v-model="cloudAutoPush" @change="saveCloudConfig" />
-              <span class="sync-label">
-                <strong>编辑后自动推送</strong>
-                <small>关闭后只在点击「立即同步」时上传</small>
-              </span>
-              <span class="sync-state" :class="{ on: cloudAutoPush }">{{ cloudAutoPush ? '已开启' : '已关闭' }}</span>
-            </label>
-          </div>
-
-          <div class="sync-box" style="margin-top: 10px">
             <div class="sync-label" style="margin-bottom: 6px">
               <strong>同步范围</strong>
               <small>未勾选的模块不同步（不上传、也不被远端覆盖）</small>
@@ -1141,6 +1371,49 @@ async function clearAll() {
         </p>
       </div>
 
+      <!-- 同步记录：与「文档输出 · 执行记录」同范式（统计条 + 导出 xlsx + 清空 + 分页 6/页）
+           数据存在 localStorage（wb_synclog_v1）而非 IndexedDB —— 写库会触发自动推送，形成记录↔推送死循环。 -->
+      <div class="data-block sync-log-block">
+        <div class="log-head">
+          <h4 class="block-title">同步记录</h4>
+          <div class="log-actions">
+            <span class="log-stat muted">共 {{ syncLogStats.total }} 次 · 成功 {{ syncLogStats.success }} · 失败 {{ syncLogStats.fail }}</span>
+            <button v-if="syncLogs.length" class="ghost sm" @click="exportSyncLogXlsx">导出记录</button>
+            <button v-if="syncLogs.length" class="ghost sm" @click="clearSyncLogs">清空记录</button>
+          </div>
+        </div>
+        <p class="muted">
+          记录「测试连接 / 手动同步 / 每日定时同步」三类触发的每一次同步结果（最多保留 200 条）。
+        </p>
+        <div v-if="!syncLogs.length" class="muted">暂无同步记录</div>
+        <template v-else>
+          <div class="log-list">
+            <div v-for="l in pagedSyncLogs" :key="l.id" class="log-row" :class="l.ok ? 'ok' : 'fail'">
+              <span class="log-time">{{ fmtLogTime(l.at) }}</span>
+              <span class="log-trigger">{{ l.triggerLabel }}</span>
+              <span class="log-result">{{ l.ok ? '成功' : '失败' }}</span>
+              <span class="log-info" :title="l.ok ? l.result : l.error">{{ l.ok ? l.result : l.error }}</span>
+            </div>
+          </div>
+          <div class="note-pager">
+            <span class="muted pager-info">第 {{ syncLogPage }} / {{ syncLogTotalPages }} 页 · 共 {{ syncLogs.length }} 条</span>
+            <div class="pager-controls">
+              <button class="ghost sm" :disabled="syncLogPage <= 1" @click="syncLogPage--">上一页</button>
+              <button class="ghost sm" :disabled="syncLogPage >= syncLogTotalPages" @click="syncLogPage++">下一页</button>
+              <span class="pager-sep"></span>
+              <span class="muted">每页</span>
+              <span class="pageSize-wrap">
+                <button class="ghost sm pageSize-trigger" :class="{ active: syncLogPageSizeOpen }" @click.stop="syncLogPageSizeOpen = !syncLogPageSizeOpen">{{ syncLogPageSize }} 条 ▴</button>
+                <div v-if="syncLogPageSizeOpen" class="pageSize-pop">
+                  <button v-for="s in [6, 20, 50, 100]" :key="s" class="ghost sm" :class="{ active: syncLogPageSize === s }" @click.stop="setSyncLogPageSize(s)">{{ s }} 条</button>
+                </div>
+              </span>
+            </div>
+            <div v-if="syncLogPageSizeOpen" class="pop-backdrop" @click="syncLogPageSizeOpen = false"></div>
+          </div>
+        </template>
+      </div>
+
       <div class="data-block danger-block">
         <h4 class="block-title">危险区</h4>
         <p class="muted">清空后不可恢复，请先导出备份。</p>
@@ -1162,10 +1435,6 @@ async function clearAll() {
       <!-- 任务预设 -->
       <div v-show="currentTab === 'tasks'" class="tab-panel">
         <div class="setting-group">
-          <div class="set-row">
-            <label>默认跟进时间（分钟）</label>
-            <input type="number" min="1" v-model.number="settings.defaultFollowUp" style="max-width: 140px" @change="saveSettings" />
-          </div>
           <div class="set-row">
             <label>跟进时间预设（可增删，待办创建时可选）</label>
             <div class="preset-list">
@@ -1281,19 +1550,20 @@ async function clearAll() {
 
         <div class="setting-group">
           <div class="set-row">
-            <label>值班周期任务（星期 + 当日班次 双重匹配，每天早 9 点自动生成）</label>
+            <label>值班周期任务（星期 + 当日班次 双重匹配，每天到达各规则设定的生成钟点自动生成）</label>
             <p class="muted rule-help">
-              每天早 9 点，按下方条件自动生成对应任务，生成结果会直接出现在
+              每天到达各规则设定的生成钟点，按下方条件自动生成对应任务，生成结果会直接出现在
               <strong>总览「今天要处理」</strong>与<strong>任务管理</strong>列表里，无需手动建。
               班次取自日程表导入的排班：<code>9:00-c9:00</code> = 主班，<code>9:00-18:00</code> = 副班，
-              <code>9:00-20:30</code> 且落在周六日 = 周末白班，无排班记录 = 休班。
+              <code>9:00-20:30</code> 且当天是<strong>非工作日</strong>（周六日 / 法定节假日放假）= 周末白班，
+              无排班记录 = 休班。
             </p>
 
             <div class="rule-top">
               <button class="primary sm" @click="openNewRule">
                 <span class="rt-plus">+</span> 添加预设任务
               </button>
-              <span class="muted rt-desc">每天早 9 点按条件自动生成任务；若任务的完成时间已过当天时间，则顺延至次日生成</span>
+              <span class="muted rt-desc">每天到达各规则设定的生成钟点按条件自动生成任务；若任务的完成时间已过当天时间，则顺延至次日生成</span>
             </div>
             <div v-if="!periodicDutyTasks.length" class="muted empty-rule">还没有自动化规则。</div>
             <div v-for="r in periodicDutyTasks" :key="r.id" class="rule-card">
@@ -1353,22 +1623,15 @@ async function clearAll() {
                   <!-- 排班条件 -->
                   <div class="sample-section">
                     <label class="sample-label">排班条件</label>
-                    <div class="sample-row schedule-row">
-                      <div class="person-select shift-multi-select" @click.stop>
-                        <div class="person-trigger" @click="shiftDropdownOpen = !shiftDropdownOpen">
-                          <span v-if="!newRuleShifts.length" class="person-placeholder">班次：不限（可多选）</span>
-                          <span v-else class="person-tags">
-                            <span v-for="s in newRuleShifts" :key="s" class="person-tag">{{ s }}</span>
-                          </span>
-                          <span class="person-arrow">▼</span>
-                        </div>
-                        <div v-if="shiftDropdownOpen" class="person-dropdown">
-                          <label v-for="s in SHIFT_OPTIONS" :key="s" class="person-option">
-                            <input type="checkbox" :checked="newRuleShifts.includes(s)" @change="toggleNewShift(s)" />
-                            <span>{{ s }}<span v-if="s === '不限'" class="muted opt-note">（清空多选）</span></span>
-                          </label>
-                        </div>
-                      </div>
+
+                    <!-- 触发频率：每周 / 每月 -->
+                    <div class="freq-row">
+                      <button type="button" class="freq-btn" :class="{ on: newRuleFreq === 'weekly' }" @click="setNewFreq('weekly')">按星期</button>
+                      <button type="button" class="freq-btn" :class="{ on: newRuleFreq === 'monthly' }" @click="setNewFreq('monthly')">按月日期</button>
+                    </div>
+
+                    <!-- 每周：选周几 -->
+                    <div v-if="newRuleFreq === 'weekly'" class="sample-row schedule-row">
                       <div class="person-select weekday-select" @click.stop>
                         <div class="person-trigger" @click="weekdayDropdownOpen = !weekdayDropdownOpen">
                           <span v-if="!newRuleWeekdays.length" class="person-placeholder">选择周几...</span>
@@ -1385,12 +1648,73 @@ async function clearAll() {
                         </div>
                       </div>
                     </div>
+
+                    <!-- 每月：选日期（多选 + 半月/月末预设） -->
+                    <div v-else class="monthday-block">
+                      <div class="monthday-quick">
+                        <button type="button" class="ghost xs" @click="applyHalfMonth">半月（15号+月末）</button>
+                        <button type="button" class="ghost xs" @click="newRuleMonthDays = [31]">仅月末</button>
+                        <button type="button" class="ghost xs" @click="newRuleMonthDays = []">清空</button>
+                      </div>
+                      <div class="monthday-grid">
+                        <button v-for="d in 31" :key="d" type="button"
+                          class="monthday-cell" :class="{ on: newRuleMonthDays.includes(d) }"
+                          @click="toggleNewMonthDay(d)">{{ d }}</button>
+                      </div>
+                      <p class="sample-tip">已选：{{ newRuleMonthDays.slice().sort((a, b) => a - b).join('、') || '（未选，将不触发）' }} 号（月末用 31 在 30 天月份自动归到当月最后一天）</p>
+                    </div>
+
+                    <div class="sample-row schedule-row">
+                      <div class="person-select shift-multi-select" @click.stop>
+                        <div class="person-trigger" @click="shiftDropdownOpen = !shiftDropdownOpen">
+                          <span v-if="!newRuleShifts.length" class="person-placeholder">班次：不限（可多选）</span>
+                          <span v-else class="person-tags">
+                            <span v-for="s in newRuleShifts" :key="s" class="person-tag">{{ s }}</span>
+                          </span>
+                          <span class="person-arrow">▼</span>
+                        </div>
+                        <div v-if="shiftDropdownOpen" class="person-dropdown">
+                          <label v-for="s in SHIFT_OPTIONS" :key="s" class="person-option">
+                            <input type="checkbox" :checked="newRuleShifts.includes(s)" @change="toggleNewShift(s)" />
+                            <span>{{ s }}<span v-if="s === '不限'" class="muted opt-note">（清空多选）</span></span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+
                     <div class="sample-row schedule-row date-range-row">
                       <input v-model="newRuleDateRangeStart" type="date" class="sample-input date-input" placeholder="开始日期" />
                       <input v-model="newRuleDateRangeEnd" type="date" class="sample-input date-input" placeholder="结束日期" />
                     </div>
-                    <p class="sample-tip">时间范围留空则默认全部时间，周几留空则不限定星期。</p>
-                    <p class="sample-preview">{{ previewText({ title: newRuleTitle, persons: newRulePersons, shifts: newRuleShifts, weekdays: newRuleWeekdays, dateRange: { start: newRuleDateRangeStart, end: newRuleDateRangeEnd }, dueTime: newRuleDueTime }) }}</p>
+                    <p class="sample-tip">时间范围留空则默认全部时间；按星期时周几留空=不限定星期，按月时日期留空=不触发。</p>
+                    <p class="sample-preview">{{ previewText({ title: newRuleTitle, persons: newRulePersons, shifts: newRuleShifts, weekdays: newRuleWeekdays, freq: newRuleFreq, monthDays: newRuleMonthDays, dateRange: { start: newRuleDateRangeStart, end: newRuleDateRangeEnd }, dueTime: newRuleDueTime, projectId: newRuleProjectId }) }}</p>
+                  </div>
+
+                  <!-- 生成时间（钟点） -->
+                  <div class="sample-section">
+                    <label class="sample-label">
+                      生成时间（钟点）
+                      <span class="sample-hint">每天到达该钟点才生成；0 = 打开即生成；默认 9 点</span>
+                    </label>
+                    <div class="sample-row">
+                      <input v-model.number="newRuleGenHour" type="number" min="0" max="23" class="sample-input time-input" />
+                      <span class="sample-hint">点</span>
+                    </div>
+                  </div>
+
+                  <!-- 生成到项目（需求 10：可挂载到指定项目 / 自动子项目） -->
+                  <div class="sample-section">
+                    <label class="sample-label">
+                      生成到项目
+                      <span class="sample-hint">不选则归入默认项目；选「自动子项目」父项目会按生成日期自动挂到对应周子项目</span>
+                    </label>
+                    <select v-model="newRuleProjectId" class="sample-select proj-select">
+                      <option :value="null">（默认项目）</option>
+                      <option v-for="p in projectOptions" :key="p.id" :value="p.id">
+                        {{ p.name }}{{ p.autoChildren ? '（自动子项目）' : '' }}
+                      </option>
+                    </select>
+                    <p class="sample-tip">下拉里没有「自动子项目」？先去侧栏「项目管理」编辑该项目，勾选"自动生成 年/月/周 子项目"后保存，这里才会出现对应选项。已有项目可以直接编辑开启。</p>
                   </div>
 
                   <!-- 完成时限 / 四象限 -->
@@ -1410,7 +1734,7 @@ async function clearAll() {
                       <input type="checkbox" v-model="newRuleDocOutput" />
                       <span class="sc-title">关联到「文档输出」</span>
                     </label>
-                    <p class="sample-tip sc-desc">该规则生成的任务到完成时间后，会在任务卡片显示「执行文档输出」按钮，点击后先选 A 文件再执行。<br/>文档输出配置仍在「文档输出」页维护；这里只决定哪些预设任务会触发它。</p>
+                    <p class="sample-tip sc-desc">该规则生成的任务到完成时间后，会在任务卡片显示「数据看板输出」按钮，点击后先选 A 文件再执行。<br/>文档输出配置仍在「文档输出」页维护；这里只决定哪些预设任务会触发它。</p>
                   </div>
 
                   <!-- 备注 -->
@@ -1485,7 +1809,7 @@ async function clearAll() {
           </div>
         </div>
         <button class="primary" @click="saveSettings">保存设置</button>
-        <p v-if="saveTip && currentTab === 'look'" class="save-tip" :class="{ ok: saveTipOk, err: !saveTipOk }">{{ saveTip }}</p>
+        <!-- 提示已移到页面级浮层（见模板顶部），此处不再重复渲染，避免同一条消息出现两次 -->
       </div>
     </div>
   </div>
@@ -1533,6 +1857,152 @@ async function clearAll() {
 .danger-block {
   border-color: rgba(239, 68, 68, 0.3);
   background: rgba(239, 68, 68, 0.04);
+}
+
+/* ===== 同步记录（对齐 DocOutput.vue「执行记录」的排版）===== */
+.sync-log-block {
+  min-width: 0;
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.log-head .block-title {
+  margin: 0;
+}
+.log-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.log-stat {
+  font-size: 12px;
+}
+.log-list {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 96px 84px 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  border-left: 3px solid transparent;
+  background: var(--panel);
+}
+.log-row + .log-row {
+  border-top: 1px solid var(--border);
+}
+.log-row.ok {
+  border-left-color: var(--success);
+}
+.log-row.fail {
+  border-left-color: var(--danger);
+}
+.log-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.log-trigger {
+  color: var(--text);
+  white-space: nowrap;
+}
+.log-result {
+  font-weight: 600;
+}
+.log-row.ok .log-result {
+  color: var(--success);
+}
+.log-row.fail .log-result {
+  color: var(--danger);
+}
+.log-info {
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.log-row.fail .log-info {
+  color: var(--danger);
+}
+/* 翻页栏：与「文档输出 / 笔记库」的分页样式保持一致 */
+.note-pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 2px 2px;
+  margin-top: 2px;
+}
+.pager-info {
+  font-size: 12px;
+}
+.pager-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.pager-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.pageSize-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.pageSize-trigger {
+  min-width: 66px;
+}
+.pageSize-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--panel-solid);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .16);
+}
+.pageSize-pop .ghost.sm {
+  width: 100%;
+  text-align: center;
+  justify-content: center;
+}
+.pop-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+@media (max-width: 720px) {
+  /* 手机端：时间 + 触发方式 + 结果 占一行，说明换行到第二行整行铺开，避免挤成 1 个字宽 */
+  .log-row {
+    grid-template-columns: 88px 1fr auto;
+    row-gap: 2px;
+  }
+  .log-info {
+    grid-column: 1 / -1;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
 }
 .import-btn {
   display: inline-flex;
@@ -2287,16 +2757,34 @@ code {
   padding: 1px 6px;
   border-radius: 4px;
 }
+/* 全局操作提示：浮层，不占文档流，不挤压任何 panel（改前是文档流内的一行文字，
+   且只在外观 tab 里存在 —— 详见模板顶部注释）。失败提示文案较长，故限宽+换行。 */
 .save-tip {
-  margin-top: 10px;
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  max-width: min(92vw, 560px);
+  padding: 10px 14px;
+  border-radius: 10px;
   font-size: 13px;
-  min-height: 20px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: pointer;
+  color: var(--text);
+  background: var(--panel-solid);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18);
 }
 .save-tip.ok {
   color: var(--success);
+  border-color: var(--success);
 }
 .save-tip.err {
   color: var(--danger);
+  border-color: var(--danger);
 }
 /* 顶层分类 TAB：数据管理 / 预设 */
 .top-tabs {
@@ -2479,6 +2967,72 @@ code {
   color: var(--primary);
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* 频率切换（每周 / 每月） */
+.freq-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.freq-btn {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-solid);
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.freq-btn.on {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-soft);
+  font-weight: 600;
+}
+/* 每月日期多选 */
+.monthday-block {
+  margin: 4px 0 8px;
+}
+.monthday-quick {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.ghost.xs {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.monthday-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 5px;
+}
+.monthday-cell {
+  padding: 6px 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.monthday-cell.on {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+  font-weight: 600;
+}
+.proj-select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 13px;
 }
 
 /* 人员多选 */

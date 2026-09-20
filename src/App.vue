@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, onErrorCaptured } from 'vue'
 import Overview from './views/Overview.vue'
 import Tasks from './views/Tasks.vue'
 import Notes from './views/Notes.vue'
@@ -16,6 +16,34 @@ import { docState, requestDocOutput, startRun, restoreDocRun, closeDocModal, res
 
 const manualPath = ref('')
 const copiedDiagnostics = ref(false)
+
+/* 全局脚本错误捕获条：某个视图渲染失败时（历史症状：主区域空白、侧栏正常），
+   把真实错误直接显示在页面上，免去让用户开 F12 取证的往返。点击可关闭。 */
+const appError = ref('')
+onErrorCaptured((err, instance, info) => {
+  const msg = (err && err.message) || String(err)
+  appError.value = msg + (info ? '  [' + info + ']' : '')
+  return false // 阻止继续冒泡，保住应用外壳（侧栏等）
+})
+if (typeof window !== 'undefined') {
+  window.addEventListener('error', (e) => {
+    if (!appError.value) appError.value = 'window: ' + (e.message || 'unknown error')
+  })
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason
+    if (!appError.value) appError.value = 'async: ' + ((r && r.message) || String(r || 'unknown'))
+  })
+}
+
+/* 本地软件唤醒失败的可见反馈（localOpen.js 在桥不可达时派发 wb:open-fail） */
+const openFailMsg = ref('')
+let openFailTimer = null
+function onOpenFail(e) {
+  const d = (e && e.detail) || {}
+  openFailMsg.value = '本地软件唤醒失败：' + (d.error || '本地桥未响应') + '（链接：' + (d.target || d.url || '') + '）'
+  if (openFailTimer) clearTimeout(openFailTimer)
+  openFailTimer = setTimeout(() => { openFailMsg.value = '' }, 9000)
+}
 
 function submitManualPath() {
   const p = normalizeAPath(manualPath.value)
@@ -53,6 +81,7 @@ function tDocStep(name) {
     macro2: '执行宏②（公式匹配）',
     copyRename: '复制并重命名 B',
     deleteSheet: '删除指定 sheet',
+    planB: '线上表格自动粘贴',
     openWps: '打开 WPS 线上表',
     submit: '提交执行请求'
   }
@@ -176,6 +205,20 @@ const navItems = [
 ].filter((n) => !isMobileDevice || n.key !== 'docoutput')
 const current = ref('overview')
 
+/* 移动端底部 Tab：只留 4 个高频入口 + 1 个「更多」；
+   其余（复盘 / 设置中心）收进「更多」抽屉。PC 侧栏不受影响，仍是完整 navItems。
+   实现方式：一个 nav 容器同时服务两端 —— 非移动槽位的项在 ≤720px 打 .m-hide，移动端补一颗「更多」。 */
+const MOBILE_TABS = ['overview', 'tasks', 'duty', 'notes']
+const moreOpen = ref(false)
+// 「更多」抽屉里的项（= 移动端不在底部 Tab 的项）
+const moreNavItems = computed(() => navItems.filter((n) => !MOBILE_TABS.includes(n.key)))
+// 「更多」是否处于选中态（当前页在该抽屉里时高亮）
+const moreActive = computed(() => moreNavItems.value.some((n) => n.key === current.value))
+watch(current, () => { moreOpen.value = false })
+
+/* 移动端数字条：把右侧 4 张统计卡压成一行短标签 */
+const M_SHORT = { todo: '待办', doing: '进行中', done: '已完成', over: '逾期' }
+
 /* 总览下钻：项目卡片 → 任务管理筛选；noteId 用于跳转到指定笔记的编辑态 */
 const tasksProjectFilter = ref(null)
 const openNoteId = ref(null)
@@ -212,10 +255,10 @@ const metrics = computed(() => {
   const completed = tasks.value.filter((t) => t.status === '已完成' && (t.completedAt || 0) >= todayStart && (t.completedAt || 0) < todayEnd)
   const completedYest = tasks.value.filter((t) => t.status === '已完成' && (t.completedAt || 0) >= yesterdayStart && (t.completedAt || 0) < todayStart)
   const overdue = tasks.value.filter(
-    (t) => t.status !== '已完成' && (t.nextRemindAt ?? t.followUpAt ?? 0) > 0 && (t.nextRemindAt ?? t.followUpAt) < now
+    (t) => t.status !== '已完成' && (t.nextRemindAt || t.followUpAt || 0) > 0 && (t.nextRemindAt || t.followUpAt) < now
   )
   const overdueYest = tasks.value.filter(
-    (t) => t.status !== '已完成' && (t.nextRemindAt ?? t.followUpAt ?? 0) > 0 && (t.nextRemindAt ?? t.followUpAt) < yesterdayStart
+    (t) => t.status !== '已完成' && (t.nextRemindAt || t.followUpAt || 0) > 0 && (t.nextRemindAt || t.followUpAt) < yesterdayStart
   )
   return [
     { key: 'todo', label: '今日待办', value: today.length, prev: yest.length, icon: 'inbox', accent: 'primary' },
@@ -285,7 +328,7 @@ async function checkReminders() {
         reminded.add(key)
         if (active) toasts.value.push({ uid: toastUid(), t, mode: 'docoutput', snooze: 30, custom: 30 })
         else {
-          notify('文档输出提醒', `${t.title} 到执行时间，请点任务上的「执行文档输出」`, focusWorkbench)
+          notify('文档输出提醒', `${t.title} 到执行时间，请点任务上的「数据看板输出」`, focusWorkbench)
           scheduleReask(key, 30)
         }
       }
@@ -410,11 +453,13 @@ onMounted(async () => {
   metricTimer = setInterval(loadMetrics, 60000)
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('wb:goto', onGotoEvent)
+  window.addEventListener('wb:open-fail', onOpenFail)
 })
 onUnmounted(() => {
   clearInterval(timer)
   clearInterval(metricTimer)
   window.removeEventListener('wb:goto', onGotoEvent)
+  window.removeEventListener('wb:open-fail', onOpenFail)
   document.removeEventListener('visibilitychange', onVisibility)
   document.removeEventListener('mousedown', onDocMouseDown)
   window.removeEventListener('keydown', onSkinKey)
@@ -432,6 +477,10 @@ function trend(value, prev) {
 
 <template>
   <div class="layout" :class="{ dark: theme === 'dark', 'metrics-collapsed': metricsCollapsed, 'mobile-metrics-open': mobileMetricsOpen }">
+    <!-- 全局脚本错误条（视图渲染失败时显示真实错误，替代"主区域空白"） -->
+    <div v-if="appError" class="app-err-bar" @click="appError = ''" title="点击关闭">页面脚本错误：{{ appError }}（点此关闭）</div>
+    <!-- 本地软件唤醒失败提示（localOpen 桥调用失败时） -->
+    <div v-if="openFailMsg" class="app-msg-bar" @click="openFailMsg = ''" title="点击关闭">{{ openFailMsg }}</div>
     <!-- 移动端顶部栏（仅 ≤720px 显示）：当前页标题 + 调出任务总览 -->
     <header class="m-appbar">
       <div class="m-title">{{ currentTitle }}</div>
@@ -448,20 +497,45 @@ function trend(value, prev) {
     <!-- 移动端任务总览遮罩（仅抽屉打开时） -->
     <div v-if="mobileMetricsOpen" class="m-mask" @click="toggleMobileMetrics"></div>
 
+    <!-- 移动端「更多」抽屉（≤720px）：复盘 / 设置中心。遮罩铺满，点空白关闭 -->
+    <div v-if="moreOpen" class="m-more-mask" @click="moreOpen = false"></div>
+    <div v-if="moreOpen" class="m-more-sheet">
+      <div class="m-more-title">更多</div>
+      <button
+        v-for="n in moreNavItems"
+        :key="n.key"
+        class="m-more-item"
+        :class="{ active: current === n.key }"
+        @click="current = n.key; moreOpen = false"
+      >
+        <span class="m-more-label">{{ n.label }}</span>
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+
     <!-- 左侧导航 -->
     <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
       <div class="brand">
-        <div class="brand-mark">WB</div>
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7.6" height="7.6" rx="2"/>
+            <rect x="13.4" y="3" width="7.6" height="7.6" rx="2"/>
+            <rect x="3" y="13.4" width="7.6" height="7.6" rx="2"/>
+            <rect x="13.4" y="13.4" width="7.6" height="7.6" rx="2"/>
+          </svg>
+        </div>
         <div class="brand-text">
-          <div class="brand-name">WenXBuddy</div>
-          <div class="brand-sub">个人工作台</div>
+          <div class="brand-name">个人工作台</div>
         </div>
       </div>
       <nav class="nav">
         <button
           v-for="n in navItems"
           :key="n.key"
-          :class="['nav-item', { active: current === n.key, 'has-float': n.key === 'notes' }]"
+          :data-key="n.key"
+          :class="['nav-item', { active: current === n.key, 'has-float': n.key === 'notes', 'm-hide': !MOBILE_TABS.includes(n.key) }]"
           @click="current = n.key"
           :title="n.label"
         >
@@ -508,6 +582,20 @@ function trend(value, prev) {
               <path v-else d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </span>
+        </button>
+        <!-- 移动端第 5 个 Tab：更多（≤720px 才显示；PC 侧栏隐藏） -->
+        <button
+          class="nav-item nav-more"
+          :class="{ active: moreActive || moreOpen }"
+          :title="'更多'"
+          @click="moreOpen = !moreOpen"
+        >
+          <svg class="nav-ico" viewBox="0 0 24 24" width="20" height="20">
+            <circle cx="5.5" cy="12" r="1.9" fill="currentColor"/>
+            <circle cx="12" cy="12" r="1.9" fill="currentColor"/>
+            <circle cx="18.5" cy="12" r="1.9" fill="currentColor"/>
+          </svg>
+          <span class="nav-label">更多</span>
         </button>
       </nav>
       <div class="sidebar-foot">
@@ -568,6 +656,22 @@ function trend(value, prev) {
           <div class="avatar" title="个人工作台">BR</div>
         </div>
       </header>
+
+      <!-- 移动端数字条（≤720px，仅总览）：把 PC 右侧栏那 4 张统计卡压成一行常显，
+           替代指标栏在窄屏被隐藏后的信息空缺。点击任一格 → 跳到任务管理。 -->
+      <div class="m-numbar" v-if="current === 'overview'">
+        <button
+          v-for="m in metrics"
+          :key="m.key"
+          class="mnb-item"
+          :class="`accent-${m.accent}`"
+          @click="goto('tasks')"
+          :title="m.label"
+        >
+          <span class="mnb-val">{{ m.value }}</span>
+          <span class="mnb-lab">{{ M_SHORT[m.key] || m.label }}</span>
+        </button>
+      </div>
 
       <section class="content">
         <Overview v-if="current === 'overview'" @goto="goto" />
@@ -646,14 +750,14 @@ function trend(value, prev) {
             <path d="M5 4l1.5 1.5M19 4l-1.5 1.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
           </svg>
           <template v-if="toast.mode === 'due'">是否已完成？</template>
-          <template v-else-if="toast.mode === 'docoutput'">请执行文档输出</template>
+          <template v-else-if="toast.mode === 'docoutput'">请执行数据看板输出</template>
           <template v-else>{{ toast.sub ? `${toast.t.title} · ${toast.sub.text}` : toast.t.title }}</template>
         </div>
         <div v-if="toast.mode === 'due'" class="toast-body muted">
           {{ toast.sub ? `${toast.t.title} · ${toast.sub.text}` : toast.t.title }} 已到完成时间
         </div>
         <div v-else-if="toast.mode === 'docoutput'" class="toast-body muted">
-          {{ toast.t.title }} 已到执行时间，点「执行」选 A 文件并运行（用当前文档输出配置）
+          {{ toast.t.title }} 已到执行时间，点下方「执行」选 A 文件并运行（用当前文档输出配置）
         </div>
         <div class="toast-actions">
           <template v-if="toast.mode === 'docoutput'">
@@ -690,8 +794,12 @@ function trend(value, prev) {
     <div v-if="docState.modal.visible" class="do-modal-mask" @click="closeDocModal">
       <div class="do-modal" @click.stop>
         <div class="do-modal-head">
-          <span :class="['do-modal-icon', docState.modal.ok ? 'ok' : 'fail']">
-            <svg v-if="docState.modal.ok" viewBox="0 0 24 24" width="22" height="22">
+          <span :class="['do-modal-icon', docState.modal.cancel ? 'info' : (docState.modal.ok ? 'ok' : 'fail')]">
+            <svg v-if="docState.modal.cancel" viewBox="0 0 24 24" width="22" height="22">
+              <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M12 11v5M12 7.6v0.4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+            <svg v-else-if="docState.modal.ok" viewBox="0 0 24 24" width="22" height="22">
               <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>
               <path d="M8 12l3 3 5-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
             </svg>
@@ -709,14 +817,14 @@ function trend(value, prev) {
         </div>
         <div class="do-modal-body">
           <p v-if="docState.modal.message" class="do-modal-msg">{{ docState.modal.message }}</p>
-          <div v-if="docState.modal.diagnostics" class="do-modal-diagnostics">
+          <div v-if="docState.modal.diagnostics && !docState.modal.cancel" class="do-modal-diagnostics">
             <div class="do-diag-head">
               <span class="muted">诊断信息</span>
               <button class="ghost xs" :class="{ success: copiedDiagnostics }" @click="copyDiagnostics">{{ copiedDiagnostics ? '已复制' : '复制' }}</button>
             </div>
             <pre>{{ docState.modal.diagnostics }}</pre>
           </div>
-          <div v-if="docState.modal.title === '选择文件失败' || docState.modal.manual" class="do-modal-manual">
+          <div v-if="!docState.modal.cancel && (docState.modal.title === '选择文件失败' || docState.modal.manual)" class="do-modal-manual">
             <p class="muted">如果文件选择框无法弹出，可手动粘贴 A 文件的完整路径：</p>
             <input v-model="manualPath" type="text" placeholder="例如：D:\导出\日报 2026-08-15.xlsx" @keyup.enter="submitManualPath" />
             <button class="primary sm" :disabled="!manualPath.trim()" @click="submitManualPath">用此路径执行</button>
@@ -767,14 +875,35 @@ function trend(value, prev) {
   .layout {
     grid-template-columns: auto 1fr;
   }
+  /* ★ 必须 !important：基础规则 .metrics { display:flex }（见下方"右侧指标"段）在本媒体查询【之后】声明，
+     同优先级下后声明者胜出 ⇒ 之前这条 display:none 被静默覆盖，指标栏在 ≤1100px 仍是 grid 子项。
+     后果（已实测）：手机上 .layout 单列时，指标栏占了隐式第 3 行（425px 高），把 .main 从 ~600px 挤到 151px，
+     .content 只剩 55px ⇒ 用户看到的"内容被压成一条 / 按钮被裁 / 滚不到"。
+     .layout.mobile-metrics-open .metrics 优先级更高（3 个类），抽屉仍可正常弹出。 */
   .metrics {
-    display: none;
+    display: none !important;
   }
 }
 /* 移动端专属元素：默认（桌面）隐藏，仅在 ≤720px 出现 */
 .m-appbar,
-.m-mask {
+.m-mask,
+.m-more-mask,
+.m-more-sheet {
   display: none;
+}
+/* ⚠️ 「更多」按钮同时带 .nav-item 与 .nav-more 两个类，而基础规则 `.nav-item { display:flex }` 在本文件
+   【更靠后】的位置声明（两者同为 0,1,0 优先级 ⇒ 后声明者胜出），会把上面那条 display:none 静默覆盖
+   ⇒ PC 端也会多冒出第 5 个「更多」按钮；更糟的是它的 :class 里有 `active: moreActive`，
+   而 moreActive 只按「当前页是否属于非移动槽位」判定，PC 端同样为真 ⇒ 选中「设置中心」时
+   「更多」会跟着一起高亮（用户 2026-09-20 反馈的现象）。所以这条必须 !important。
+   移动端要恢复显示，同样得带 !important 才能压过它。 */
+.nav-more {
+  display: none !important;
+}
+/* .m-numbar 是 .main 的直系子元素 ⇒ 会被全局 `.main > * { display:flex !important }`（style.css:885）压过，
+   所以这条隐藏声明必须带 !important，否则「只在手机总览出现」的数字条会在 PC 端也显示出来。 */
+.m-numbar {
+  display: none !important;
 }
 
 @media (max-width: 720px) {
@@ -803,6 +932,7 @@ function trend(value, prev) {
     min-height: 0 !important;
     height: 100% !important;
     overflow-y: auto !important;
+    gap: 12px !important;          /* 桌面 16px：手机上顶栏→数字条→内容之间收紧一点 */
     padding: 0 !important;
     /* 避让底部固定 Tab，避免内容被遮挡。
        底部 Tab 实高 ≈ 60（icon+label+padding 6） + iOS Home Indicator ≈ 34 ≈ 94；
@@ -876,9 +1006,10 @@ function trend(value, prev) {
   .nav {
     flex-direction: row !important;
     flex: 1;
-    justify-content: flex-start !important; /* 不再 space-around，保留 6 项自然宽度 */
+    justify-content: flex-start !important;
     gap: 0 !important;
-    overflow-x: auto !important; /* 6 项放不下时横向滑动，而非折叠成 > */
+    /* 固定 5 槽位后每格等分宽度，不再需要横向滑动；保留 auto 作为极端窄屏兜底 */
+    overflow-x: auto !important;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
   }
@@ -886,18 +1017,36 @@ function trend(value, prev) {
     display: none;
   }
   .nav-item {
-    flex: 0 0 auto; /* 不平均分配，按内容宽度排，溢出可滑 */
-    min-width: 60px;
+    /* 5 个 Tab 等分底栏宽度（4 个直达 + 更多），点击区域更大且不溢出 */
+    flex: 1 1 0;
+    min-width: 0;
     flex-direction: column;
     gap: 2px;
     font-size: 11px;
-    padding: 6px 6px !important;
+    padding: 6px 2px !important;
     border-radius: 10px;
     color: var(--muted, #888);
+    /* 槽位顺序：总览 / 任务管理 / 日程管理 / 知识库 / 更多 */
+    order: 9;
   }
-  .nav-item.active {
-    color: var(--accent, #2aabe8);
-    background: color-mix(in srgb, var(--accent, #2aabe8) 12%, transparent);
+  .nav-item[data-key="overview"] { order: 1; }
+  .nav-item[data-key="tasks"] { order: 2; }
+  .nav-item[data-key="duty"] { order: 3; }
+  .nav-item[data-key="notes"] { order: 4; }
+  .nav-more { order: 5; }
+  /* 非移动槽位的入口（复盘 / 设置中心）在手机上从底栏移除，改由「更多」抽屉进入 */
+  .nav-item.m-hide {
+    display: none !important;
+  }
+  /* 移动端第 5 槽「更多」：与其它 Tab 同构。
+     !important 是为了压过基础规则里的 `.nav-more { display:none !important }`（PC 隐藏态）。 */
+  .nav-more {
+    display: flex !important;
+    align-items: center;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
   }
   .nav-ico {
     width: 22px;
@@ -905,6 +1054,12 @@ function trend(value, prev) {
   }
   .nav-label {
     font-size: 11px;
+    text-align: center;
+    flex: none;
+  }
+  .nav-item.active {
+    color: var(--accent, #2aabe8);
+    background: color-mix(in srgb, var(--accent, #2aabe8) 12%, transparent);
   }
 
   /* 问题③：手机端去除底部 Tab 的折叠/展开按钮（PC 端不变）。
@@ -944,9 +1099,138 @@ function trend(value, prev) {
     box-shadow: -10px 0 30px rgba(0, 0, 0, 0.3);
     animation: m-sheet-in 0.2s ease;
   }
+  /* 抽屉里的指标卡：窄容器（≈328px）下卡内内容原本会横向溢出被裁（实测卡片 374 / 内容 497），
+     这里收窄图标列与内距、并允许「较昨日」一行换行，保证 4 张卡都完整可见。 */
+  .layout.mobile-metrics-open .metric-card {
+    grid-template-columns: 32px 1fr auto;
+    padding: 12px;
+    gap: 4px 10px;
+    min-width: 0;
+  }
+  .layout.mobile-metrics-open .metric-icon {
+    width: 32px;
+    height: 32px;
+  }
+  .layout.mobile-metrics-open .metric-body {
+    min-width: 0;
+  }
+  .layout.mobile-metrics-open .metric-trend,
+  .layout.mobile-metrics-open .metric-sub {
+    white-space: normal;
+  }
   @keyframes m-sheet-in {
     from { transform: translateX(100%); }
     to { transform: translateX(0); }
+  }
+
+  /* ===== 移动端数字条（总览首屏）：4 项统计压成一行，替代被隐藏的指标栏 =====
+     选择器写成 .main > .m-numbar 并全项 !important，是为了压过 style.css 的
+     `.main > * { flex:1 1 auto !important; display:flex !important; flex-direction:column !important }`
+     （否则会被拉成与内容等高的竖排块；实测未压过时 h=269px）。 */
+  .main > .m-numbar {
+    display: flex !important;
+    flex: 0 0 54px !important;
+    flex-direction: row !important;
+    min-height: 54px !important;
+    height: 54px;
+    align-items: stretch;
+    border-radius: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .mnb-item {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    padding: 0 2px;
+  }
+  .mnb-item + .mnb-item {
+    border-left: 1px solid var(--border);
+  }
+  .mnb-item:active {
+    background: var(--panel-2);
+  }
+  .mnb-val {
+    font-size: 19px;
+    font-weight: 700;
+    line-height: 1.05;
+    color: var(--text);
+  }
+  .mnb-lab {
+    font-size: 10.5px;
+    line-height: 1.1;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .mnb-item.accent-primary .mnb-val { color: var(--primary); }
+  .mnb-item.accent-success .mnb-val { color: var(--success); }
+  .mnb-item.accent-danger .mnb-val { color: var(--danger); }
+
+  /* ===== 移动端「更多」抽屉：从底栏上方升起 ===== */
+  .m-more-mask {
+    display: block !important;
+    position: fixed;
+    inset: 0;
+    z-index: 62;
+    background: rgba(0, 0, 0, 0.38);
+  }
+  .m-more-sheet {
+    display: block !important;
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: calc(70px + env(safe-area-inset-bottom));
+    z-index: 64;
+    padding: 10px 12px 12px;
+    border-radius: 16px;
+    background: var(--panel-solid);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, .28);
+    animation: m-more-in .18s ease;
+  }
+  @keyframes m-more-in {
+    from { transform: translateY(12px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  .m-more-title {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 2px 4px 8px;
+  }
+  .m-more-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 12px 8px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    font-size: 15px;
+    cursor: pointer;
+  }
+  .m-more-item + .m-more-item {
+    border-top: 1px solid var(--border);
+  }
+  .m-more-item.active {
+    color: var(--primary);
+    background: var(--primary-soft, rgba(42, 171, 232, .12));
+  }
+  .m-more-item svg {
+    color: var(--muted);
+    flex: none;
   }
 }
 
@@ -1077,11 +1361,6 @@ function trend(value, prev) {
 .brand-name {
   font-weight: 600;
   font-size: 14px;
-}
-.brand-sub {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 2px;
 }
 .nav {
   display: flex;
@@ -1558,6 +1837,36 @@ function trend(value, prev) {
 }
 
 /* 文档输出结果弹窗 */
+/* 全局脚本错误条 / 唤醒失败提示条：固定在视口顶部居中，点击关闭 */
+.app-err-bar,
+.app-msg-bar {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 400;
+  max-width: min(860px, 92vw);
+  padding: 8px 18px;
+  border-radius: 0 0 10px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  word-break: break-all;
+}
+.app-err-bar {
+  background: #7f1d1d;
+  color: #fecaca;
+  border: 1px solid #ef4444;
+  border-top: none;
+}
+.app-msg-bar {
+  background: #78350f;
+  color: #fde68a;
+  border: 1px solid #f59e0b;
+  border-top: none;
+}
+.app-err-bar + .app-msg-bar { top: 34px; }
+
 .do-modal-mask {
   position: fixed;
   inset: 0;
@@ -1590,6 +1899,7 @@ function trend(value, prev) {
 .do-modal-icon { display: flex; }
 .do-modal-icon.ok { color: var(--success); }
 .do-modal-icon.fail { color: var(--danger); }
+.do-modal-icon.info { color: var(--muted); }
 .do-modal-close {
   border: none;
   background: transparent;

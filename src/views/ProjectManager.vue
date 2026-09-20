@@ -2,10 +2,11 @@
 /**
  * 项目管理弹窗
  * 增 / 改 / 删 / 排序项目；完成度支持自动统计或手动指定。
- * 删除项目时任务不会丢，只会回落到「默认项目」。
+ * 删除项目会**级联删除它的整棵子树**（含所有层级的子项目及其任务），删除前提示共几个项目 / 几个任务。
  */
 import { ref, computed, watch, onMounted, reactive } from 'vue'
 import { db } from '../db'
+import { shiftKeyOf } from '../shift'
 
 const props = defineProps({
   tasks: { type: Array, default: () => [] }
@@ -23,9 +24,39 @@ async function load() {
 }
 onMounted(load)
 
+// 整棵子树（含子项目、孙项目）的项目 id 集合 —— **展示 / 统计用**。
+// ⚠️ 递归时排除已归档的子项目 —— 与总览 ProjectStack.calcCard 的 subtreeIds 保持完全一致，
+//    否则同一棵项目树在两个页面会算出不同的任务数。
+function subtreeIds(id, out = new Set()) {
+  if (id == null || out.has(id)) return out
+  out.add(id)
+  list.value
+    .filter((x) => !x.archived && (x.parentId || null) === id)
+    .forEach((x) => subtreeIds(x.id, out))
+  return out
+}
+// 整棵子树 id 集合 —— **删除专用，必须含归档项目**。
+// ⚠️ 不能复用上面那个（它排除归档）：归档的子项目同样要跟着父项目一起删，
+//    否则它的 parentId 会指向一个已删项目，变成界面里再也看不见的孤儿。
+function subtreeIdsForDelete(id, out = new Set()) {
+  if (id == null || out.has(id)) return out
+  out.add(id)
+  list.value
+    .filter((x) => (x.parentId || null) === id)
+    .forEach((x) => subtreeIdsForDelete(x.id, out))
+  return out
+}
+// 整棵子树的任务数 —— **列表展示用它**。
+// 口径与总览项目卡片一致：项目常被当「文件夹」，任务都挂在最底层子项目上，
+// 只算直接任务的话父项目永远显示 0/0 任务（用户 2026-09-13 反馈「0 不合理」）。
 function taskCount(id) {
-  const own = props.tasks.filter((t) => t.projectId === id)
-  return { total: own.length, done: own.filter((t) => t.status === '已完成').length }
+  const ids = subtreeIds(id)
+  const all = props.tasks.filter((t) => ids.has(t.projectId))
+  return { total: all.length, done: all.filter((t) => t.status === '已完成').length }
+}
+// 直接子项目数（不递归，用于「含 N 个子项目」提示；同样排除归档，与总览一致）
+function childCount(id) {
+  return list.value.filter((x) => !x.archived && (x.parentId || null) === id).length
 }
 
 function toDateInput(ts) {
@@ -46,7 +77,8 @@ function startNew() {
     desc: '',
     startDate: toDateInput(Date.now()),
     endDate: '',
-    archived: 0
+    archived: 0,
+    autoChildren: 0
   }
 }
 function startEdit(p) {
@@ -60,7 +92,8 @@ function startEdit(p) {
     desc: p.desc || '',
     startDate: toDateInput(p.startAt),
     endDate: toDateInput(p.endAt),
-    archived: p.archived ? 1 : 0
+    archived: p.archived ? 1 : 0,
+    autoChildren: p.autoChildren ? 1 : 0
   }
 }
 
@@ -85,35 +118,44 @@ async function save() {
     desc: (e.desc || '').trim(),
     startAt: e.startDate ? new Date(`${e.startDate}T00:00:00`).getTime() : null,
     endAt: e.endDate ? new Date(`${e.endDate}T23:59:59`).getTime() : null,
-    archived: e.archived ? 1 : 0
-  }
-  if (e.id) {
+    archived: e.archived ? 1 : 0,
+    autoChildren: e.autoChildren ? 1 : 0
+}
+if (e.id) {
     await db.projects.update(e.id, payload)
   } else {
     payload.order = list.value.length
     payload.createdAt = Date.now()
     await db.projects.add(payload)
   }
+  // 纯懒加载：开启「自动子项目」后不预建结构，月/周容器在任务生成时按需创建
   editing.value = null
   await load()
   emit('changed')
 }
 
 async function remove(p) {
-  const { total } = taskCount(p.id)
-  if (list.value.length <= 1) {
-    alert('至少保留一个项目。')
+  // 级联删除整棵子树（用户 2026-09-13 定案 A）。含归档子项目，避免留下孤儿。
+  const ids = subtreeIdsForDelete(p.id)
+  const childN = ids.size - 1
+  const taskN = props.tasks.filter((t) => ids.has(t.projectId)).length
+  const remain = list.value.filter((x) => !ids.has(x.id)).length
+  if (remain <= 0) {
+    alert('不能删除全部项目，至少要保留一个。')
     return
   }
-  const fallback = list.value.find((x) => x.id !== p.id)
-  const msg =
-    total > 0
-      ? `删除项目「${p.name}」？\n\n该项目下的 ${total} 个任务不会被删除，会转移到「${fallback.name}」。`
-      : `删除项目「${p.name}」？`
+  let msg = `删除项目「${p.name}」？`
+  if (childN > 0) {
+    msg += `\n\n共 ${childN + 1} 个项目（含 ${childN} 个子项目）${
+      taskN > 0 ? `、${taskN} 个任务` : ''
+    }会被一并删除，且无法恢复。`
+  } else if (taskN > 0) {
+    msg += `\n\n该项目下的 ${taskN} 个任务会被一并删除，且无法恢复。`
+  }
   if (!confirm(msg)) return
   await db.transaction('rw', db.projects, db.tasks, async () => {
-    await db.tasks.where('projectId').equals(p.id).modify({ projectId: fallback.id })
-    await db.projects.delete(p.id)
+    await db.tasks.where('projectId').anyOf([...ids]).delete()
+    await db.projects.bulkDelete([...ids])
   })
   await load()
   emit('changed')
@@ -131,18 +173,10 @@ async function move(p, dir) {
   emit('changed')
 }
 
-/* ---------- 按日程添加项目 ---------- */
-const SHIFT_TYPES = [
-  { key: '主班', match: ['9:00-c9:00', '主班'] },
-  { key: '副班', match: ['9:00-18:00', '副班'] },
-  { key: '周末白班', match: ['9:00-20:30', '周末白班'] },
-  { key: '休班', match: ['休', '休班', '休息', '休息日', '调休', '请假', 'X', 'x'] }
-]
-function shiftKeyOf(shift) {
-  const s = (shift || '').trim()
-  const t = SHIFT_TYPES.find((x) => x.match.includes(s))
-  return t ? t.key : '其他'
-}
+/* ---------- 按日程添加项目 ----------
+ * 班次判定统一走 shift.js 的 shiftKeyOf(shift, dateStr)（带日期 → 周末白班按「非工作日」判定）。
+ * 不再在本文件内重复维护一份不传日期、不做归一化的本地版本（2026-09-02 用户确认三处统一）。
+ */
 function ymd(y, m, d) {
   const p = (n) => String(n).padStart(2, '0')
   return `${y}-${p(m + 1)}-${p(d)}`
@@ -175,10 +209,10 @@ const dutyDateList = computed(() => {
   const attDays = new Set(recs.map((r) => r.date))
   const personDays = new Set(recs.filter((r) => r.person === person).map((r) => r.date))
   if (mode === 'duty') {
-    return [...new Set(recs.filter((r) => r.person === person && shiftKeyOf(r.shift) !== '休班').map((r) => r.date))].sort()
+    return [...new Set(recs.filter((r) => r.person === person && shiftKeyOf(r.shift, r.date) !== '休班').map((r) => r.date))].sort()
   }
   const fromBlank = [...attDays].filter((d) => !personDays.has(d))
-  const explicit = recs.filter((r) => r.person === person && shiftKeyOf(r.shift) === '休班').map((r) => r.date)
+  const explicit = recs.filter((r) => r.person === person && shiftKeyOf(r.shift, r.date) === '休班').map((r) => r.date)
   return [...new Set([...fromBlank, ...explicit])].sort()
 })
 watch(
@@ -293,8 +327,12 @@ async function createProjectFromDuty() {
                   <span v-if="p.archived" class="pm-tag">已归档</span>
                 </div>
                 <div class="muted pm-sub">
+                  <!-- ⚠️ 这里的 done/total 是**整棵子树的合计**（子项目里的任务也计入），
+                       与总览的项目卡片口径一致；父项目只当文件夹、自己没任务时也能显示真实进度。
+                       末尾补「含 N 个子项目」让这个合计数字自解释，不然会以为数错了。 -->
                   {{ p.progressMode === 'manual' ? `手动 ${p.manualProgress}%` : '自动统计' }}
                   · {{ taskCount(p.id).done }}/{{ taskCount(p.id).total }} 任务
+                  <template v-if="childCount(p.id)">· 含 {{ childCount(p.id) }} 个子项目（已合计）</template>
                 </div>
               </div>
               <div class="pm-ops">
@@ -365,6 +403,10 @@ async function createProjectFromDuty() {
           <label class="radio">
             <input type="checkbox" :checked="!!editing.archived" @change="editing.archived = $event.target.checked ? 1 : 0" />
             归档（不在总览的项目堆叠中显示）
+          </label>
+          <label class="radio auto-children-toggle">
+            <input type="checkbox" :checked="!!editing.autoChildren" @change="editing.autoChildren = $event.target.checked ? 1 : 0" />
+            自动生成 年/月/周 子项目（开启后按日期自动派生「YYYY年M月」与「M月D日-M月D日」子项目，承载预设任务）
           </label>
 
           <div v-if="err" class="err">{{ err }}</div>

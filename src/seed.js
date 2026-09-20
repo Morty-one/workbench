@@ -156,7 +156,6 @@ export async function seedIfEmpty() {
   ])
 
   await db.settings.bulkPut([
-    { key: 'defaultFollowUp', value: 60 }, // 默认跟进：60 分钟
     {
       key: 'quadrantColors',
       value: {

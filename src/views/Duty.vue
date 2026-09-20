@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import * as XLSX from 'xlsx-js-style'
 import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate'
 import { db } from '../db'
+import { getHolidayMap, shiftKeyOf, SHIFT_KEYS } from '../shift'
 
 const records = ref([])
 const selMonth = ref(ymd(new Date().getFullYear(), new Date().getMonth(), 1).slice(0, 7)) // 'YYYY-MM'，日历当前月
@@ -114,19 +115,13 @@ function textOn(hex) {
   return lum > 0.6 ? '#1f2937' : '#ffffff'
 }
 
-/* ---------- 班次类型（固定类别，主班/副班/周末白班/休班） ---------- */
-const SHIFT_TYPES = [
-  { key: '主班', match: ['9:00-c9:00', '主班'] },
-  { key: '副班', match: ['9:00-18:00', '副班'] },
-  { key: '周末白班', match: ['9:00-20:30', '周末白班'] },
-  { key: '休班', match: ['休', '休班', '休息', '休息日', '调休', '请假', 'X', 'x'] }
-]
+/* ---------- 班次颜色 ----------
+ * 班次判定统一走 shift.js 的 shiftKeyOf(shift, dateStr)（带日期 → 周末白班按「非工作日」判定）。
+ * 之前本文件内另有一份不传日期、不做归一化的本地 shiftKeyOf，与总览页口径不一致：
+ * 同一天（如国庆 10/1 周四）值班页显示「周末白班」、总览却显示「其他」。现统一。
+ * 2026-09-02 用户确认：Duty / Tasks / ProjectManager 三处全部改用 shift.js 版本。
+ */
 const SHIFT_COLOR = { 主班: '#6366f1', 副班: '#10b981', 周末白班: '#f59e0b', 休班: '#94a3b8', 其他: '#94a3b8' }
-function shiftKeyOf(shift) {
-  const s = (shift || '').trim()
-  const t = SHIFT_TYPES.find((t) => t.match.includes(s))
-  return t ? t.key : '其他'
-}
 function shiftColor(key) {
   return SHIFT_COLOR[key] || '#94a3b8'
 }
@@ -141,7 +136,7 @@ function inTime(r) {
 }
 function inShift(r) {
   if (selShift.value === 'all') return true
-  return shiftKeyOf(r.shift) === selShift.value
+  return shiftKeyOf(r.shift, r.date) === selShift.value
 }
 
 async function load() {
@@ -200,9 +195,10 @@ function inPerson(r) {
   if (showSet.value === null) return true
   return showSet.value.has(r.person)
 }
-// 班次类型固定排序权重：主班 → 副班 → 周末白班 → 其他(末尾)
+// 班次类型固定排序权重：主班 → 副班 → 周末白班 → 休班 → 其他(末尾)
+// 顺序取自 shift.js 的 SHIFT_KEYS，避免本文件重复维护一份班次清单
 function shiftOrder(key) {
-  const i = SHIFT_TYPES.findIndex((t) => t.key === key)
+  const i = SHIFT_KEYS.indexOf(key)
   return i < 0 ? 999 : i
 }
 
@@ -212,7 +208,7 @@ const personShiftStats = computed(() => {
   const map = {}
   for (const r of statRecords.value) {
     if (!r.person || !inTime(r) || !inShift(r) || !inPerson(r)) continue
-    const k = shiftKeyOf(r.shift)
+    const k = shiftKeyOf(r.shift, r.date)
     const id = `${r.person}·${k}`
     if (!map[id]) map[id] = { id, person: r.person, shiftKey: k, count: 0, hours: 0 }
     map[id].count++
@@ -234,7 +230,7 @@ const maxPSCount = computed(() => Math.max(1, ...personShiftStats.value.map((s) 
 const restDays = computed(
   () =>
     statRecords.value.filter(
-      (r) => r.person && shiftKeyOf(r.shift) === '休班' && inTime(r) && inPerson(r)
+      (r) => r.person && shiftKeyOf(r.shift, r.date) === '休班' && inTime(r) && inPerson(r)
     ).length
 )
 
@@ -312,17 +308,7 @@ function isWeekend(idx) {
   return idx % 7 === 5 || idx % 7 === 6
 }
 
-/* ---------- 节假日提示（2026 法定假日内置；可在设置中增删自定义） ---------- */
-// 2026 年国务院办公厅放假安排（仅法定假日，不含调休补班日）
-const BUILTIN_HOLIDAYS = [
-  { start: '2026-01-01', end: '2026-01-03', name: '元旦' },
-  { start: '2026-02-15', end: '2026-02-23', name: '春节' },
-  { start: '2026-04-04', end: '2026-04-06', name: '清明节' },
-  { start: '2026-05-01', end: '2026-05-05', name: '劳动节' },
-  { start: '2026-06-19', end: '2026-06-21', name: '端午节' },
-  { start: '2026-09-25', end: '2026-09-27', name: '中秋节' },
-  { start: '2026-10-01', end: '2026-10-07', name: '国庆节' }
-]
+/* ---------- 节假日提示（节假日数据集中维护在 shift.js 的 BUILTIN_HOLIDAYS_2026 / BUILTIN_WORKDAYS_2026；本组件只维护用户自定义节假日） ---------- */
 // 自定义节假日（用户增删，持久化到 db.settings 'holidays'）：[{ date, name }]
 const customHolidays = ref([])
 const holidayManageOpen = ref(false)
@@ -332,23 +318,9 @@ async function loadHolidays() {
   const rec = await db.settings.get('holidays')
   customHolidays.value = rec && Array.isArray(rec.value) ? rec.value : []
 }
-// dateStr -> { name, custom }；内置法定假日 + 自定义
-const holidayMap = computed(() => {
-  const m = new Map()
-  for (const h of BUILTIN_HOLIDAYS) {
-    let d = h.start
-    while (d <= h.end) {
-      m.set(d, { name: h.name, custom: false })
-      const [y, mo, da] = d.split('-').map(Number)
-      const nx = new Date(y, mo - 1, da + 1)
-      d = ymd(nx.getFullYear(), nx.getMonth(), nx.getDate())
-    }
-  }
-  for (const c of customHolidays.value) {
-    if (c && c.date) m.set(c.date, { name: c.name || '节假日', custom: true })
-  }
-  return m
-})
+// dateStr -> { name, custom }；内置法定假日（来自 shift.js）+ 用户自定义节假日
+// 与原 Duty.vue 行为一致：custom 后写入覆盖 builtin。
+const holidayMap = computed(() => getHolidayMap(customHolidays.value))
 function holidayName(dateStr) {
   const h = holidayMap.value.get(dateStr)
   return h ? h.name : ''
@@ -640,7 +612,7 @@ function buildCalTemplateSheet(people = 3, dataRecords = null) {
       const atR = d <= 19 ? b1base[pi] : b2base[pi]
       const shR = atR + 1
       const hoR = atR + 2
-      if (shiftKeyOf(r.shift) === '休班') continue   // 休班在考勤表即空格子，留空
+      if (shiftKeyOf(r.shift, r.date) === '休班') continue   // 休班在考勤表即空格子，留空
       rows[atR][col] = '√'
       rows[shR][col] = r.shift || ''
       const mh = String(r.remark || '').match(/工时\s*([\d.]+)\s*h/i)
@@ -1129,8 +1101,8 @@ onMounted(async () => {
               v-for="r in byDate(c.dateStr)"
               :key="r.id"
               class="duty-chip"
-              :class="{ rest: shiftKeyOf(r.shift) === '休班', editable: editMode && !r._virtual }"
-              :style="shiftKeyOf(r.shift) === '休班' ? {} : { background: colorFor(r.person), color: textOn(colorFor(r.person)) }"
+              :class="{ rest: shiftKeyOf(r.shift, r.date) === '休班', editable: editMode && !r._virtual }"
+              :style="shiftKeyOf(r.shift, r.date) === '休班' ? {} : { background: colorFor(r.person), color: textOn(colorFor(r.person)) }"
               :title="`${r.person} ${r.shift} ${r.remark || ''}`"
               @click.stop="editMode && !r._virtual ? openEdit(r) : null"
             >
@@ -1355,12 +1327,12 @@ onMounted(async () => {
           <span class="muted">班次类型：</span>
           <button class="chip sm" :class="{ active: selShift === 'all' }" @click="selShift = 'all'">全部</button>
           <button
-            v-for="t in SHIFT_TYPES"
-            :key="t.key"
+            v-for="t in SHIFT_KEYS"
+            :key="t"
             class="chip sm"
-            :class="{ active: selShift === t.key }"
-            @click="selShift = t.key"
-          >{{ t.key }}</button>
+            :class="{ active: selShift === t }"
+            @click="selShift = t"
+          >{{ t }}</button>
         </div>
 
         <!-- 休班汇总：醒目展示当前筛选范围内的休班天数合计 -->

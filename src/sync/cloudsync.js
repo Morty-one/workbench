@@ -6,6 +6,14 @@
 import { db } from '../db'
 import { encryptData, decryptData } from '../crypto'
 import { createGitHubBackend } from './GitHubBackend'
+import { addSyncLog } from './synclog'
+
+// ---- 自动同步方式开关（2026-09-20 用户定案）------------------------------------
+// 用户明确表示这两种方式「现在不要，后续需要再加」，故在此统一关闭：
+//   autoPush:false → 本地改动后不再防抖（3 秒）自动推送；手动「立即同步」与每日定时同步不受影响
+//   bootPull:false → 启动时不再自动拉取远端；仍需手动「立即同步」或等定时同步
+// ⚠️ 代码路径完整保留，**后续要恢复只改这里两个布尔值即可**（不要删下面的逻辑分支）。
+export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: false }
 
 const SYNC_TABLES = ['tasks', 'folders', 'notes', 'shortcuts', 'duty', 'settings', 'projects']
 // 可勾选的同步模块（设置中心以“类”为单位勾选，内部展开为具体表）
@@ -34,7 +42,7 @@ const LS_SYNCED_AT = 'wb_cloud_syncedAt' // 本端已确认过的远端快照时
 const LS_DIRTY_AT = 'wb_cloud_dirtyAt' // 本端最后一次本地修改时间
 
 // ---- 模块状态 ----
-let cfg = { repo: '', pat: '', pw: '', autoPush: true, modules: null }
+let cfg = { repo: '', pat: '', pw: '', autoPush: AUTO_SYNC_FEATURES.autoPush, modules: null }
 let ready = false // 初始拉取完成前禁止自动推送（防种子数据覆盖远端）
 let pulledInSession = false // 本次会话是否成功完成过一轮 pull 判定
 let syncing = false
@@ -55,7 +63,8 @@ export function configureCloud(opts = {}) {
   if (typeof opts.repo === 'string') cfg.repo = opts.repo
   if (typeof opts.pat === 'string') cfg.pat = opts.pat
   if (typeof opts.pw === 'string') cfg.pw = opts.pw
-  if (typeof opts.autoPush === 'boolean') cfg.autoPush = opts.autoPush
+  // 总开关 AUTO_SYNC_FEATURES.autoPush 为 false 时，外部（设置中心）传什么都保持关闭
+  if (typeof opts.autoPush === 'boolean') cfg.autoPush = AUTO_SYNC_FEATURES.autoPush && opts.autoPush
   if (Array.isArray(opts.modules)) cfg.modules = opts.modules
 }
 
@@ -126,7 +135,8 @@ export async function restoreSnapshot(snap, tablesArg) {
 // ---- 完整同步：pull-before-push（LWW）----
 // 规则：
 //   unseen = 远端 updatedAt > 本端已确认时间戳（说明远端有本端没见过的版本）
-//   满足 unseen 且（本次会话没拉取过 或 远端比本端最后修改更新）→ 用远端还原本地
+//   localAhead = 本地有真实改动且严格晚于远端（远端是旧快照）→ 禁止还原，直接推送本地
+//   满足 unseen 且非 localAhead 且（本次会话没拉取过 或 远端比本端最后修改更新）→ 用远端还原本地
 //   否则 → 把本端快照加密推送（带 sha，409 自动重试一次）
 async function syncOnce(reason, tablesArg) {
   const be = backend()
@@ -136,17 +146,36 @@ async function syncOnce(reason, tablesArg) {
   let sha = null
   if (got) {
     sha = got.sha
+    // 解析与解密必须分开报错：以前两者共用一个 catch，会把「内容为空 / 文件过大」也
+    // 伪装成「密码不一致」，排查成本极高。（2026-09 实测：快照 >1MB 时 Contents API
+    // 返回空 content，就走到了这条路上，其实是密码完全正确）
+    let payload
     try {
-      remoteSnap = await decryptData(JSON.parse(b64ToUtf8(got.content)), cfg.pw)
+      payload = JSON.parse(b64ToUtf8(got.content))
     } catch (_) {
-      throw new Error('解密失败：云端加密密码与本端设置不一致')
+      throw new Error('远端快照解析失败：内容为空或不是合法的加密快照（文件是否已超过 1MB？）')
+    }
+    try {
+      remoteSnap = await decryptData(payload, cfg.pw)
+    } catch (_) {
+      throw new Error('解密失败：本端密码解不开云端快照（两边加密密码不一致，或云端快照是别的密码推上去的）')
     }
   }
   const syncedAt = getSyncedAt()
   const localSnap = await collectSnapshot(tablesArg)
   const unseen = remoteSnap && remoteSnap.updatedAt > syncedAt
+  // 保护性判定（2026-09 新增）：本地已有真实改动（dirtyAt > 0）且严格晚于远端快照
+  // ⇒ 远端是旧快照，绝不能拿它覆盖本地。否则当本端「已确认时间戳」缺失/为 0 时，
+  // 下面 LWW 判定里的 `!havePulledBeforeCheck()` 分支会在启动瞬间静默吃掉本地新数据。
+  // 新设备不受影响：App.vue 中 bootCloudSync() 先于 seedIfEmpty() 执行，此刻 dirtyAt 仍为 0。
+  const dirtyAt = getDirtyAt()
+  const localAhead = !!remoteSnap && dirtyAt > 0 && localSnap.updatedAt > remoteSnap.updatedAt
+  if (localAhead) {
+    console.warn('[cloudsync] 云端快照较旧（远端 ' + new Date(remoteSnap.updatedAt).toLocaleString() +
+      ' < 本地 ' + new Date(localSnap.updatedAt).toLocaleString() + '），跳过还原，改为推送本地')
+  }
   // 2) LWW 判定（只针对本次勾选的表做还原，未勾选模块保持本端不变）
-  if (unseen && (!havePulledBeforeCheck() || remoteSnap.updatedAt > localSnap.updatedAt)) {
+  if (unseen && !localAhead && (!havePulledBeforeCheck() || remoteSnap.updatedAt > localSnap.updatedAt)) {
     await restoreSnapshot(remoteSnap, tablesArg)
     setSyncedAt(remoteSnap.updatedAt)
     state.lastSyncAt = Date.now()
@@ -167,7 +196,13 @@ async function syncOnce(reason, tablesArg) {
       const again = await be.get()
       let againSnap = null
       if (again) {
-        try { againSnap = await decryptData(JSON.parse(b64ToUtf8(again.content)), cfg.pw) } catch (_) { throw new Error('解密失败：云端加密密码与本端设置不一致') }
+        let againPayload
+        try {
+          againPayload = JSON.parse(b64ToUtf8(again.content))
+        } catch (_) {
+          throw new Error('远端快照解析失败：内容为空或不是合法的加密快照（文件是否已超过 1MB？）')
+        }
+        try { againSnap = await decryptData(againPayload, cfg.pw) } catch (_) { throw new Error('解密失败：本端密码解不开云端快照（两边加密密码不一致，或云端快照是别的密码推上去的）') }
       }
       if (againSnap && againSnap.updatedAt > localSnap.updatedAt) {
         await restoreSnapshot(againSnap, tablesArg)
@@ -185,7 +220,7 @@ async function syncOnce(reason, tablesArg) {
   }
   setSyncedAt(localSnap.updatedAt)
   state.lastSyncAt = Date.now()
-  state.lastResult = '已推送到云端 ✓'
+  state.lastResult = localAhead ? '本地较新（云端是旧快照），已推送本地 ✓' : '已推送到云端 ✓'
   state.lastError = ''
   emit()
   return { restored: false }
@@ -203,13 +238,17 @@ export async function runSync(reason = 'manual', opts = {}) {
   if (!cloudConfigured()) throw new Error('请先在设置中心填写云端仓库 / PAT / 加密密码')
   if (syncing) throw new Error('同步正在进行中，请稍候')
   syncing = true
+  const startedAt = Date.now()
   const tables = expandModules((opts && opts.modules && opts.modules.length) ? opts.modules : cfg.modules)
   try {
     const r = await syncOnce(reason, tables)
     pulledInSession = true
     ready = true
+    // 执行记录：一次同步只记一条，结果文案直接用状态里的 lastResult（推送/拉取都由它描述）
+    addSyncLog(reason, { ok: true, result: state.lastResult || '已同步 ✓', startedAt })
     return r
   } catch (e) {
+    addSyncLog(reason, { ok: false, error: e && e.message ? e.message : String(e), startedAt })
     throw e
   } finally {
     syncing = false
@@ -217,7 +256,9 @@ export async function runSync(reason = 'manual', opts = {}) {
 }
 
 // ---- 自动推送（数据变更后防抖触发）----
+// ⚠️ 当前已由 AUTO_SYNC_FEATURES.autoPush = false 关闭（用户定案），写库不再触发同步。
 export function requestCloudSync() {
+  if (!AUTO_SYNC_FEATURES.autoPush) return // 「编辑后自动推送」已关闭
   if (!cloudConfigured() || !cfg.autoPush || !ready || restoring) return
   if (pushTimer) clearTimeout(pushTimer)
   pushTimer = setTimeout(() => {
@@ -267,6 +308,7 @@ function startScheduler() {
 
 // ---- 应用启动时调用：读配置 → 拉取远端（远端较新则还原并刷新页面）→ 就绪 ----
 async function attemptBoot() {
+  if (!AUTO_SYNC_FEATURES.bootPull) return // 「开机拉取」已关闭
   const r = await runSync('boot')
   pulledInSession = true
   if (r && r.restored) {
@@ -285,13 +327,20 @@ export async function bootCloudSync() {
       repo: (r && r.value) || '',
       pat: (p && p.value) || '',
       pw: (w && w.value) || '',
-      autoPush: !a || a.value !== false,
+      // 存的偏好仍读出来，但受总开关压制（见 AUTO_SYNC_FEATURES）
+      autoPush: AUTO_SYNC_FEATURES.autoPush && (!a || a.value !== false),
       modules
     })
     // 定时同步：默认开启、默认 17:30
     configureSchedule(!so || so.value !== false, (st && st.value) || '17:30')
   } catch (_) { /* 配置读取失败按未配置处理 */ }
   if (!cloudConfigured()) { ready = true; return }
+  if (!AUTO_SYNC_FEATURES.bootPull) {
+    // 「开机拉取」已关闭：启动不做任何自动同步，直接置就绪。
+    // 之后仍可用设置中心「立即同步」手动拉取/推送，每日定时同步也照常工作。
+    ready = true
+    return
+  }
   try {
     await attemptBoot()
   } catch (e) {
@@ -309,6 +358,13 @@ export async function bootCloudSync() {
 // ---- 连通性测试（设置中心“测试连接”按钮）----
 export async function testCloudConnection() {
   const be = backend()
-  await be.verify()
-  return true
+  const startedAt = Date.now()
+  try {
+    await be.verify()
+    addSyncLog('test', { ok: true, result: '连接正常：仓库可读、令牌有效', startedAt })
+    return true
+  } catch (e) {
+    addSyncLog('test', { ok: false, error: e && e.message ? e.message : String(e), startedAt })
+    throw e
+  }
 }

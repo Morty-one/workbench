@@ -36,6 +36,13 @@ const notes = ref([])
 /* 知识库列表按标签筛选（"设为任务"按钮旁）：'' = 全部 */
 const listTagFilter = ref('')
 const noteTagOptions = computed(() => [...new Set(notes.value.flatMap((n) => n.tags || []))].sort())
+/* 知识库列表排序：'updatedAt' = 最后修改时间（默认），'createdAt' = 创建时间 */
+const noteSortBy = ref(localStorage.getItem('wb_note_sort') === 'createdAt' ? 'createdAt' : 'updatedAt')
+function toggleNoteSort() {
+  noteSortBy.value = noteSortBy.value === 'updatedAt' ? 'createdAt' : 'updatedAt'
+  localStorage.setItem('wb_note_sort', noteSortBy.value)
+  loadNotes()
+}
 const displayNotes = computed(() =>
   listTagFilter.value ? notes.value.filter((n) => (n.tags || []).includes(listTagFilter.value)) : notes.value
 )
@@ -239,7 +246,8 @@ async function loadNotes() {
         (n.tags || []).some((t) => t.toLowerCase().includes(q))
     )
   }
-  notes.value = all.sort((a, b) => b.updatedAt - a.updatedAt)
+  const sk = noteSortBy.value === 'createdAt' ? 'createdAt' : 'updatedAt'
+  notes.value = all.sort((a, b) => (b[sk] || 0) - (a[sk] || 0))
 }
 
 // 当前日期（YYYY-MM-DD），作为新建目录的默认名
@@ -1196,6 +1204,10 @@ watch(
                 <option value="">全部标签</option>
                 <option v-for="t in noteTagOptions" :key="t" :value="t">{{ t }}</option>
               </select>
+              <button class="ghost sm note-sort-btn" :title="noteSortBy === 'updatedAt' ? '当前按最后修改时间排序，点击切换为创建时间' : '当前按创建时间排序，点击切换为最后修改时间'" @click="toggleNoteSort">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5v14M7 19l-2.5-2.5M7 19l2.5-2.5M17 19V5M17 5l-2.5 2.5M17 5l2.5 2.5"/></svg>
+                <span>{{ noteSortBy === 'updatedAt' ? '修改时间' : '创建时间' }}</span>
+              </button>
               <button class="ghost sm" :class="{ active: noteSelecting }" @click="toggleNoteSelect">{{ noteSelecting ? '取消选择' : '批量删除' }}</button>
               <button v-if="noteSelecting" class="primary sm danger" :disabled="!selectedNoteIds.length" @click="removeNotesBatch">删除选中 ({{ selectedNoteIds.length }})</button>
               <button class="ghost sm task-select-btn" :class="{ active: taskSelecting }" @click="toggleTaskSelect">{{ taskSelecting ? '取消选择' : '设为任务' }}</button>
@@ -1458,6 +1470,25 @@ watch(
     grid-column: 1 !important;
     height: auto !important;
     overflow: visible !important;
+  }
+  /* 导出工具栏：按钮多、且 .eb-left/.eb-right 子项一律 flex-shrink:0 + nowrap（桌面端刻意如此），
+     窄屏放不下就会横向溢出被祖先裁掉（实测 .eb-left 内容 495px 塞进 373px）。
+     手机端改为「可横向滑动」：不折行、不裁切，滑一下就能看到后面的按钮。 */
+  .export-bar {
+    padding: 8px 10px 4px;
+  }
+  .eb-left,
+  .eb-right {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .eb-left::-webkit-scrollbar,
+  .eb-right::-webkit-scrollbar {
+    display: none;
   }
 }
 .side {

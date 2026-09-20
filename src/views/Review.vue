@@ -231,7 +231,7 @@ const inProgress = computed(() => tasks.value.filter((t) => t.status === '跟进
 const overdue = computed(() => {
   const now = Date.now()
   return tasks.value.filter(
-    (t) => t.status !== '已完成' && (t.nextRemindAt ?? t.followUpAt ?? 0) > 0 && (t.nextRemindAt ?? t.followUpAt) < now
+    (t) => t.status !== '已完成' && (t.nextRemindAt || t.followUpAt || 0) > 0 && (t.nextRemindAt || t.followUpAt) < now
   )
 })
 const todayNotes = computed(() =>

@@ -56,7 +56,23 @@ export function loadDocConfig() {
 export function loadDocLog() {
   try {
     const s = localStorage.getItem(LOG_KEY)
-    if (s) return JSON.parse(s)
+    if (!s) return []
+    const arr = JSON.parse(s)
+    if (!Array.isArray(arr)) return []
+    // 迁移：历史日志里 failedStep / error / detail 可能是 number（早期版本遗留），
+    // 一律转字符串，避免模板里 tStep(t)/tDetail(t) 调用 startsWith 崩溃。
+    // 已转过的记录保持原样（typeof === 'string'）不再变动。
+    let changed = false
+    for (const r of arr) {
+      if (!r || typeof r !== 'object') continue
+      for (const k of ['failedStep', 'error']) {
+        if (r[k] != null && typeof r[k] !== 'string') { r[k] = String(r[k]); changed = true }
+      }
+    }
+    if (changed) {
+      try { localStorage.setItem(LOG_KEY, JSON.stringify(arr)) } catch {}
+    }
+    return arr
   } catch (e) {}
   return []
 }
@@ -83,9 +99,16 @@ function updateCurrentLog(patch) {
   }
 }
 
+// 清掉页头那条一闪而过的提示，避免弹窗出现后页头还留着「正在尝试打开文件选择框…」
+function clearFlash() {
+  if (msgTimer) { clearTimeout(msgTimer); msgTimer = null }
+  docState.msg = ''
+}
+
 // 弹窗
-export function showDocModal({ title, message, steps = [], ok = true, diagnostics = '' }) {
-  docState.modal = { visible: true, title, message, steps, ok, diagnostics }
+// cancel=true → 「已取消」轻量弹窗：中性图标，且不渲染诊断信息与手动粘贴路径
+export function showDocModal({ title, message, steps = [], ok = true, diagnostics = '', manual = false, cancel = false }) {
+  docState.modal = { visible: true, title, message, steps, ok, diagnostics, manual, cancel }
 }
 
 export function closeDocModal() {
@@ -139,14 +162,31 @@ export function resetDocRun() {
   flash('已重置执行状态')
 }
 
-// 选 A 文件（带全局锁，防止重复弹窗）
-export async function pickFile() {
+// 选文件（带全局锁，防止重复弹窗）
+// scope：'A' = 页面主按钮「数据看板输出」选 A 文件；'B' = 「① 文件」里 B 的「浏览…」
+// 用户主动取消（关掉文件框）不算失败 → 走单独一条轻量弹窗；A/B 两个入口的文案各写各的，绝不混用
+const CANCEL_MSG = {
+  A: '已取消选择 A 文件，未执行任何操作。需要时再点「数据看板输出」重新选择即可。',
+  B: '已取消选择 B 文件，B 文件路径保持原样。需要时重新点「浏览…」选择即可。'
+}
+
+export async function pickFile(scope = 'A') {
   if (docState.picking) return null
   docState.picking = true
   flash('正在尝试打开文件选择框…')
   try {
     const d = await callBridge('/pick-file')
     if (d && d.ok && d.path) return normalizeAPath(d.path)
+    if (d && d.cancelled) {
+      clearFlash()
+      showDocModal({
+        title: '已取消选择文件',
+        message: CANCEL_MSG[scope] || CANCEL_MSG.A,
+        steps: [],
+        cancel: true
+      })
+      return null
+    }
     if (d && d.ok === false) {
       let detail = d.error || '未知错误'
       const bridgeInfo = await getBridgeInfo()
@@ -159,9 +199,9 @@ export async function pickFile() {
         // 桥正常但 /pick-file 失败：展示真实错误，不再误报为旧桥
         if (detail === '未知错误') {
           detail = '本地桥连接正常，但文件选择框未能弹出或返回路径。请查看下方诊断信息；' +
-            '也可直接在输入框粘贴 A 文件完整路径（如 D:\\导出\\日报.xlsx）。'
+            '也可直接在下方粘贴 A 文件完整路径（如 D:\\导出\\日报.xlsx）。'
         } else {
-          detail = '文件选择失败：' + detail + '。若窗口未弹出，可在输入框直接粘贴 A 文件路径。'
+          detail = '文件选择失败：' + detail + '。若窗口未弹出，可在下方直接粘贴 A 文件路径。'
         }
       }
       const diagnostics = formatDiagnostics(d, d.raw, bridgeInfo)
@@ -175,7 +215,7 @@ export async function pickFile() {
     flash('选择文件失败：' + detail)
     showDocModal({
       title: '选择文件失败',
-      message: detail + '。请确认已双击「打开工作台.vbs」启动本地服务。如果弹窗一直失败，可手动在下方输入框粘贴 A 文件路径。',
+      message: detail + '。请确认已双击「打开工作台.vbs」启动本地服务。如果弹窗一直失败，可手动在下方粘贴 A 文件路径。',
       steps: [],
       ok: false,
       manual: true,
@@ -278,7 +318,9 @@ function finishRun(d) {
   })
 
   if (d && d.ok) {
-    docState.msg = '执行成功 ✓'
+    // 成功时不再占顶部提示条：下方「执行状态」面板已经显示同样的结果，
+    // 顶部再重复一条既冗余、又会把下面的内容整体往下推。
+    docState.msg = ''
     showDocModal({
       title: '执行成功',
       message: '文档输出已完成，所有步骤均成功。',
@@ -346,7 +388,7 @@ export async function restoreDocRun() {
       return
     }
     docState.running = true
-    docState.msg = '正在执行文档输出（从之前的状态恢复）…'
+    docState.msg = '正在执行数据看板输出（从之前的状态恢复）…'
     pollStatus()
   } catch {}
 }

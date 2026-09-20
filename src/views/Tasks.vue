@@ -5,6 +5,8 @@ import * as XLSX from 'xlsx-js-style'
 import { marked } from 'marked'
 import { openExternal } from '../utils/localOpen.js'
 import { docState, requestDocOutput } from '../docoutput.js'
+import { shiftKeyOf } from '../shift'
+import TaskFormModal from '../components/TaskFormModal.vue'
 
 const props = defineProps({
   search: { type: String, default: '' },
@@ -96,18 +98,10 @@ async function onProjDrop(targetP, e) {
   await loadProjects()
 }
 
-const form = reactive({
-  title: '',
-  projectId: null,
-  quadrant: 'noturgent-important',
-  dueTime: '',
-  remindTime: '',
-  remark: '',
-  links: [],
-  subtasks: []
-})
+// 表单初始数据（由 openNew/edit 设置，传给 TaskFormModal 组件渲染；组件内管理自己的 form 状态）
+const formInitial = ref({})
 
-const projectForm = reactive({ id: null, name: '', color: '#4f46e5' })
+const projectForm = reactive({ id: null, name: '', color: '#4f46e5', autoChildren: 0 })
 // 新建/编辑项目时选择的父项目（null = 顶层项目）
 const projectParentId = ref(null)
 
@@ -387,18 +381,10 @@ function isRootActive(rootId) {
   const chain = ancestorChain.value
   return chain.length > 0 && chain[0].id === rootId
 }
-/* ---------- 按排班创建项目 ---------- */
-const SHIFT_TYPES = [
-  { key: '主班', match: ['9:00-c9:00', '主班'] },
-  { key: '副班', match: ['9:00-18:00', '副班'] },
-  { key: '周末白班', match: ['9:00-20:30', '周末白班'] },
-  { key: '休班', match: ['休', '休班', '休息', '休息日', '调休', '请假', 'X', 'x'] }
-]
-function shiftKeyOf(shift) {
-  const s = (shift || '').trim()
-  const t = SHIFT_TYPES.find((x) => x.match.includes(s))
-  return t ? t.key : '其他'
-}
+/* ---------- 按排班创建项目 ----------
+ * 班次判定统一走 shift.js 的 shiftKeyOf(shift, dateStr)（带日期 → 周末白班按「非工作日」判定）。
+ * 不再在本文件内重复维护一份不传日期、不做归一化的本地版本（2026-09-02 用户确认三处统一）。
+ */
 async function openDutyProj() {
   dutyPersons.value = [...new Set((await db.duty.toArray()).map((r) => r.person).filter(Boolean))]
   allDuty.value = await db.duty.toArray()
@@ -422,11 +408,11 @@ const dutyDateList = computed(() => {
   const attDays = new Set(recs.map((r) => r.date)) // 考勤日集合
   const personDays = new Set(recs.filter((r) => r.person === person).map((r) => r.date))
   if (mode === 'duty') {
-    return [...new Set(recs.filter((r) => r.person === person && shiftKeyOf(r.shift) !== '休班').map((r) => r.date))].sort()
+    return [...new Set(recs.filter((r) => r.person === person && shiftKeyOf(r.shift, r.date) !== '休班').map((r) => r.date))].sort()
   }
   // 休班：考勤日中该人无排班记录的部分 + 显式标注休班的日期
   const fromBlank = [...attDays].filter((d) => !personDays.has(d))
-  const explicit = recs.filter((r) => r.person === person && shiftKeyOf(r.shift) === '休班').map((r) => r.date)
+  const explicit = recs.filter((r) => r.person === person && shiftKeyOf(r.shift, r.date) === '休班').map((r) => r.date)
   return [...new Set([...fromBlank, ...explicit])].sort()
 })
 watch(
@@ -467,6 +453,7 @@ function resetProjectForm() {
   projectForm.id = null
   projectForm.name = ''
   projectForm.color = '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')
+  projectForm.autoChildren = 0
   projectParentId.value = null
 }
 function openProjectManage() {
@@ -486,6 +473,7 @@ function startEditProject(p) {
   projectForm.id = p.id
   projectForm.name = p.name
   projectForm.color = p.color || '#4f46e5'
+  projectForm.autoChildren = p.autoChildren ? 1 : 0
   projectParentId.value = p.parentId || null
 }
 async function saveProject() {
@@ -503,7 +491,7 @@ async function saveProject() {
       return
     }
   }
-  const payload = { name, color: projectForm.color || '#4f46e5', parentId: newParent }
+  const payload = { name, color: projectForm.color || '#4f46e5', parentId: newParent, autoChildren: projectForm.autoChildren ? 1 : 0 }
   if (projectForm.id) {
     await db.projects.update(projectForm.id, payload)
   } else {
@@ -580,7 +568,9 @@ function taskDueAt(t) {
       .sort((a, b) => a - b)
     if (times.length) return dayBaseOf(t.dayKey) + times[0] * 60000
   }
-  return t.nextRemindAt ?? t.followUpAt ?? 0
+  // 用 || 而非 ?? ：nextRemindAt 会被显式写 0（无提醒时间），
+  // ?? 不穿透 0，会让到期时间恒为 0，进而显示「未设完成时间」/不参与逾期判定。
+  return t.nextRemindAt || t.followUpAt || 0
 }
 function isOverdue(t) {
   if (t.status === '已完成') return false
@@ -589,8 +579,11 @@ function isOverdue(t) {
 }
 function remainText(t) {
   const at = taskDueAt(t)
-  const diff = at - now.value
   if (t.status === '已完成') return '已完成'
+  // 未设置完成时间：不参与逾期判定。
+  // 若无此判断，at=0 会让 diff 变成巨大的负数，从而误显示成「任务已逾期 XXXX天」。
+  if (at <= 0) return '未设完成时间'
+  const diff = at - now.value
   if (diff > 0) {
     const m = Math.floor(diff / 60000)
     const h = Math.floor(m / 60)
@@ -837,50 +830,62 @@ function doExport() {
 
 function openNew() {
   editingId.value = null
-  form.title = ''
-  form.remark = ''
   // 默认象限跟随当前筛选；未筛选（全部象限）时默认 重要不紧急
-  form.quadrant = focused.value || 'noturgent-important'
-  const dt = defaultDueTime()
   // 完成时间默认留空：只有用户显式设置才弹「是否完成」确认
-  form.dueTime = ''
-  form.remindTime = dt
-  form.links = []
-  form.subtasks = []
-  form.projectId = selectedProjectId.value ?? projects.value[0]?.id ?? null
+  formInitial.value = {
+    title: '',
+    remark: '',
+    quadrant: focused.value || 'noturgent-important',
+    dueTime: '',
+    remindTime: defaultDueTime(),
+    links: [],
+    subtasks: [],
+    projectId: selectedProjectId.value ?? projects.value[0]?.id ?? null
+  }
   showForm.value = true
 }
 function edit(t) {
   editingId.value = t.id
-  form.title = t.title
-  form.projectId = t.projectId ?? projects.value[0]?.id ?? null
-  form.quadrant = t.quadrant
-  form.remark = t.remark || ''
-  form.links = allLinksOf(t).slice()
-  form.subtasks = (t.subtasks || []).map((s) => ({
-    id: s.id || String(Date.now()) + Math.random().toString(36).slice(2),
-    text: s.text || '',
-    dueTime: s.dueTime || (Number(s.followMinutes) > 0 ? minutesToTime(s.followMinutes) : ''),
-    remindTime: s.remindTime || (Number(s.remindMinutes) > 0 ? minutesToTime(s.remindMinutes) : ''),
-    links: allLinksOf({ links: s.links, url: s.url, link: s.link })
-  }))
-  // 完成时间优先用显式存储的 dueTime（未设则为空，重新编辑时不再误判为已设）
   const base = dayBaseOf(t.dayKey || dayKeyOf(t.createdAt))
   const dueMin = Math.round((t.followUpAt - base) / 60000)
   const remindMin = t.nextRemindAt ? Math.round((t.nextRemindAt - base) / 60000) : dueMin
-  form.dueTime = t.dueTime || ''
-  form.remindTime = remindMin > 0 ? minutesToTime(remindMin) : (form.dueTime || defaultDueTime())
+  formInitial.value = {
+    title: t.title,
+    projectId: t.projectId ?? projects.value[0]?.id ?? null,
+    quadrant: t.quadrant,
+    remark: t.remark || '',
+    links: allLinksOf(t).slice(),
+    subtasks: (t.subtasks || []).map((s) => ({
+      id: s.id || String(Date.now()) + Math.random().toString(36).slice(2),
+      text: s.text || '',
+      done: !!s.done,
+      dueTime: s.dueTime || (Number(s.followMinutes) > 0 ? minutesToTime(s.followMinutes) : ''),
+      remindTime: s.remindTime || (Number(s.remindMinutes) > 0 ? minutesToTime(s.remindMinutes) : ''),
+      links: allLinksOf({ links: s.links, url: s.url, link: s.link })
+    })),
+    // 完成时间优先用显式存储的 dueTime（未设则为空，重新编辑时不再误判为已设）
+    dueTime: t.dueTime || '',
+    remindTime: remindMin > 0 ? minutesToTime(remindMin) : (t.dueTime || defaultDueTime())
+  }
   showForm.value = true
 }
-async function submit() {
-  if (!form.title.trim()) return
+async function onFormSubmit(data) {
+  if (!data.title.trim()) return
   const nowTs = Date.now()
   const dayKey = dayKeyOf(nowTs)
   const base = dayBaseOf(dayKey)
-  const dueMin = timeToMinutes(form.dueTime) || timeToMinutes(defaultDueTime())
-  const remindMin = timeToMinutes(form.remindTime) || dueMin
-  const projectId = form.projectId ?? projects.value[0]?.id ?? null
-  const plainSubtasks = JSON.parse(JSON.stringify(form.subtasks || []))
+  // 完成时间：填了按当天 HH:MM 锚定到当天；没填则默认「当前 +60 分钟」。
+  // 默认分支必须用绝对时间戳：跨午夜时 defaultDueTime() 会返回「00:5x」，
+  // 再锚到 base（当天 0 点）就落到今天凌晨，导致任务一创建就已逾期。
+  const dueMin = timeToMinutes(data.dueTime)
+  const remindMin = timeToMinutes(data.remindTime)
+  const hasDue = dueMin > 0
+  const dueAt = hasDue ? base + dueMin * 60000 : nowTs + 60 * 60000
+  const remindAt = remindMin > 0 ? base + remindMin * 60000 : dueAt
+  // 子任务未填时间时的回落分钟数（沿用原语义，必须是非 0 值）
+  const dueMinFallback = hasDue ? dueMin : timeToMinutes(defaultDueTime())
+  const projectId = data.projectId ?? projects.value[0]?.id ?? null
+  const plainSubtasks = JSON.parse(JSON.stringify(data.subtasks || []))
     .filter((s) => (s.text || '').trim())
     .map((s) => ({
       id: s.id || String(Date.now()) + Math.random().toString(36).slice(2),
@@ -894,11 +899,11 @@ async function submit() {
     }))
   // 有子任务时：父任务不单独设提醒，取子任务中最近的提醒时间
   const hasSubs = plainSubtasks.length > 0
-  let followUpAt = base + dueMin * 60000
-  let nextRemindAt = base + remindMin * 60000
+  let followUpAt = dueAt
+  let nextRemindAt = remindAt
   if (hasSubs) {
     const subTimes = plainSubtasks
-      .map((s) => timeToMinutes(s.remindTime || s.dueTime) || dueMin)
+      .map((s) => timeToMinutes(s.remindTime || s.dueTime) || dueMinFallback)
       .sort((a, b) => a - b)
     if (subTimes.length) {
       nextRemindAt = base + subTimes[0] * 60000
@@ -907,30 +912,30 @@ async function submit() {
   }
   if (editingId.value) {
     await db.tasks.update(editingId.value, {
-      title: form.title.trim(),
+      title: data.title.trim(),
       projectId,
-      quadrant: form.quadrant,
+      quadrant: data.quadrant,
       followUpAt,
       nextRemindAt,
-      dueTime: (form.dueTime || '').trim(),
-      remark: form.remark,
-      links: form.links.filter((l) => (l.url || '').trim()).map((l) => ({ url: l.url.trim(), label: (l.label || '打开').trim() || '打开' })),
+      dueTime: (data.dueTime || '').trim(),
+      remark: data.remark,
+      links: data.links.filter((l) => (l.url || '').trim()).map((l) => ({ url: l.url.trim(), label: (l.label || '打开').trim() || '打开' })),
       subtasks: plainSubtasks
     })
   } else {
     await db.tasks.add({
-      title: form.title.trim(),
+      title: data.title.trim(),
       projectId,
-      quadrant: form.quadrant,
+      quadrant: data.quadrant,
       status: '待办',
       followUpAt,
       nextRemindAt,
-      dueTime: (form.dueTime || '').trim(),
+      dueTime: (data.dueTime || '').trim(),
       createdAt: nowTs,
       dayKey,
       completedAt: null,
-      remark: form.remark,
-      links: form.links.filter((l) => (l.url || '').trim()).map((l) => ({ url: l.url.trim(), label: (l.label || '打开').trim() || '打开' })),
+      remark: data.remark,
+      links: data.links.filter((l) => (l.url || '').trim()).map((l) => ({ url: l.url.trim(), label: (l.label || '打开').trim() || '打开' })),
       subtasks: plainSubtasks
     })
   }
@@ -1000,23 +1005,28 @@ async function toggleSubtask(t, sub) {
 
 /* ---------- 表单内子任务编辑 ---------- */
 function addFormSubtask() {
-  form.subtasks.push({
-    id: String(Date.now()) + Math.random().toString(36).slice(2),
-    text: '',
-    dueTime: '',
-    remindTime: '',
-    links: []
-  })
+  // 已迁移到 TaskFormModal 组件内部，此处仅保留同名占位以防误调用
+  if (formInitial.value && Array.isArray(formInitial.value.subtasks)) {
+    formInitial.value.subtasks.push({
+      id: String(Date.now()) + Math.random().toString(36).slice(2),
+      text: '',
+      done: false,
+      dueTime: '',
+      remindTime: '',
+      links: []
+    })
+  }
 }
 function removeFormSubtask(i) {
-  form.subtasks.splice(i, 1)
+  if (formInitial.value && Array.isArray(formInitial.value.subtasks)) {
+    formInitial.value.subtasks.splice(i, 1)
+  }
 }
 function addFormSubLink(s) {
-  s.links = s.links || []
-  s.links.push({ url: '', label: '打开' })
+  if (s && Array.isArray(s.links)) s.links.push({ url: '', label: '打开' })
 }
 function removeFormSubLink(s, i) {
-  s.links.splice(i, 1)
+  if (s && Array.isArray(s.links)) s.links.splice(i, 1)
 }
 
 /* ---------- 把任务设为自动化预设 ---------- */
@@ -1181,6 +1191,11 @@ onUnmounted(() => {
             >{{ p.name }}{{ isInvalidParent(p.id) ? (p.id === projectForm.id ? '（不可选：当前项目）' : '（不可选：子项目）') : '' }}</option>
           </select>
           <input type="color" v-model="projectForm.color" class="pm-color-input" title="选择颜色" />
+          <label class="pm-auto-inline">
+            <input type="checkbox" :checked="!!projectForm.autoChildren" @change="projectForm.autoChildren = $event.target.checked ? 1 : 0" />
+            <span class="lbl">自动生成子项目</span>
+            <span class="pm-info" title="开启后，预设任务按生成日期自动挂到对应周子项目">i</span>
+          </label>
           <button class="ghost duty-proj-btn" @click="openDutyProj">按日程添加</button>
           <button class="primary" :disabled="!!parentError" :title="parentError || ''" @click="saveProject">{{ projectForm.id ? '保存' : '添加' }}</button>
           <button v-if="projectForm.id" class="ghost" @click="resetProjectForm">取消</button>
@@ -1331,9 +1346,9 @@ onUnmounted(() => {
                 v-if="item.task.docOutput"
                 class="docout-btn sm"
                 :disabled="docState.running || docState.picking"
-                :title="docState.running ? '正在执行中…' : '选 A 文件并执行文档输出（用当前文档输出配置）'"
+                :title="docState.running ? '正在执行中…' : '选 A 文件并执行数据看板输出（用当前文档输出配置）'"
                 @click="requestDocOutput()"
-              >{{ docState.running ? '执行中…' : (docState.picking ? '选 A…' : '执行文档输出') }}</button>
+              >{{ docState.running ? '执行中…' : (docState.picking ? '选 A…' : '数据看板输出') }}</button>
             </div>
             <div v-if="item.task.remark" class="remark">
               <svg viewBox="0 0 24 24" width="13" height="13" class="remark-ico"><path d="M4 4h16v12H8l-4 4V4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
@@ -1375,94 +1390,15 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 弹窗 -->
-    <div v-if="showForm" class="modal-mask">
-      <div class="modal">
-        <div class="modal-head">
-          <strong>{{ editingId ? '编辑待办' : '新建待办' }}</strong>
-          <button class="ghost sm" @click="closeForm" aria-label="关闭">
-            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-        <div class="grid2">
-          <div>
-            <label>标题</label>
-            <div class="voice-field">
-              <input v-model="form.title" placeholder="要做的事…" @keyup.enter="submit" />
-              <VoiceInput v-model="form.title" />
-            </div>
-          </div>
-          <div>
-            <label>所属项目</label>
-            <select v-model="form.projectId">
-              <option v-for="p in projectTree" :key="p.id" :value="p.id">{{ '··'.repeat(p.depth) }}{{ p.name }}</option>
-            </select>
-          </div>
-          <div>
-            <label>四象限分级</label>
-            <select v-model="form.quadrant">
-              <option v-for="k in QUAD_LAYOUT" :key="k" :value="k">{{ QUAD[k] }}</option>
-            </select>
-          </div>
-          <div v-if="!form.subtasks.length">
-            <label>完成时间</label>
-            <input type="time" v-model="form.dueTime" />
-          </div>
-          <div style="grid-column: 1 / -1">
-            <label>备注</label>
-            <div class="voice-field voice-field-multiline">
-              <textarea v-model="form.remark" placeholder="补充说明（可选，Enter 换行）" rows="3" class="remark-input"></textarea>
-              <VoiceInput v-model="form.remark" />
-            </div>
-          </div>
-          <div style="grid-column: 1 / -1">
-            <label>跳转链接（可多个）</label>
-            <div class="link-edit">
-              <div v-for="(lnk, li) in form.links" :key="li" class="link-row">
-                <input v-model="form.links[li].url" placeholder="https://...（可留空）" />
-                <input v-model="form.links[li].label" placeholder="名称（默认：打开）" class="link-label" />
-                <button class="ghost sm danger" type="button" @click="form.links.splice(li, 1)">删除</button>
-              </div>
-              <button class="ghost sm" type="button" @click="form.links.push({ url: '', label: '打开' })">+ 添加链接</button>
-            </div>
-          </div>
-          <div style="grid-column: 1 / -1">
-            <label>子任务（可选）</label>
-            <div class="form-subs">
-              <div v-for="(s, si) in form.subtasks" :key="s.id" class="form-sub-card">
-                <div class="form-sub-head">
-                  <span class="form-sub-idx">{{ si + 1 }}</span>
-                  <input v-model="s.text" class="form-sub-name" placeholder="子任务内容" />
-                  <VoiceInput v-model="s.text" />
-                  <label class="form-sub-f inline">
-                    <span>完成时间</span>
-                    <input type="time" v-model="s.dueTime" />
-                  </label>
-                  <button class="ghost sm danger" type="button" @click="removeFormSubtask(si)">删除</button>
-                </div>
-                <div class="form-sub-links">
-                  <span class="form-sub-links-label">跳转链接</span>
-                  <div class="form-sub-link-rows">
-                    <div v-for="(u, ui) in s.links" :key="ui" class="form-sub-link-row">
-                      <input v-model="s.links[ui].url" placeholder="https://..." />
-                      <input v-model="s.links[ui].label" placeholder="名称" class="link-label" />
-                      <button class="ghost sm danger" type="button" @click="removeFormSubLink(s, ui)">删除</button>
-                    </div>
-                    <button class="ghost sm" type="button" @click="addFormSubLink(s)">+ 添加链接</button>
-                  </div>
-                </div>
-              </div>
-              <button class="ghost sm" type="button" @click="addFormSubtask">+ 添加子任务</button>
-            </div>
-          </div>
-        </div>
-        <div class="row" style="justify-content: flex-end; margin-top: 14px">
-          <button v-if="editingId" class="danger" @click="remove(editingId)">删除此待办</button>
-          <button class="ghost" @click="closeForm">取消</button>
-          <button class="primary" @click="submit">{{ editingId ? '保存' : '添加待办' }}</button>
-        </div>
-      </div>
-    </div>
+    <!-- 弹窗：复用 TaskFormModal 公共组件（保持与总览快捷新增字段一致） -->
+    <TaskFormModal
+      :show="showForm"
+      :projects="projects"
+      :editing-id="editingId"
+      :initial-data="formInitial"
+      @update:show="showForm = $event"
+      @submit="onFormSubmit"
+    />
 
     <!-- 按日程添加项目 -->
     <div v-if="showDutyProj" class="modal-mask">
@@ -1642,6 +1578,39 @@ onUnmounted(() => {
 .pm-parent-input.invalid {
   border-color: var(--danger);
   box-shadow: 0 0 0 3px var(--danger-soft);
+}
+.pm-auto-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 8px;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.pm-auto-inline input[type="checkbox"] {
+  cursor: pointer;
+}
+.pm-auto-inline .lbl {
+  font-size: 13px;
+  color: var(--muted);
+}
+.pm-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  border: 1px solid var(--muted);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1;
+  cursor: help;
+  flex: none;
 }
 .pm-error {
   display: flex;

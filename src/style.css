@@ -261,20 +261,22 @@
 
 [data-skin="clean"] {
   /* 扒取自极简浅白参考图：白底 + 白卡片 + 淡紫渐变光 + 靛蓝强调 */
+  /* 默认靛蓝紫。以下色阶一律由 --accent-h / --accent-s 派生，
+     配合下方 [data-skin="clean"][data-accent="..."] 覆盖两者即可整体换色。 */
   --accent-h: 243; --accent-s: 75%; --accent-soft-s: 50%;
   --accent-rgb: 99 102 241;
-  --accent-50: hsl(243 75% 97%); --accent-100: hsl(243 60% 94%);
-  --accent-200: hsl(243 60% 88%); --accent-300: hsl(243 70% 76%);
-  --accent-400: hsl(243 75% 64%); --accent-500: hsl(243 75% 56%);
-  --accent-600: hsl(243 70% 46%); --accent-700: hsl(243 65% 34%);
-  --accent-800: hsl(243 58% 24%); --accent-900: hsl(243 50% 16%);
-  --accent-foreground: #ffffff; --accent-ink: hsl(243 60% 22%);
+  --accent-50: hsl(var(--accent-h) var(--accent-s) 97%); --accent-100: hsl(var(--accent-h) 60% 94%);
+  --accent-200: hsl(var(--accent-h) 60% 88%); --accent-300: hsl(var(--accent-h) 70% 76%);
+  --accent-400: hsl(var(--accent-h) var(--accent-s) 64%); --accent-500: hsl(var(--accent-h) var(--accent-s) 56%);
+  --accent-600: hsl(var(--accent-h) 70% 46%); --accent-700: hsl(var(--accent-h) 65% 34%);
+  --accent-800: hsl(var(--accent-h) 58% 24%); --accent-900: hsl(var(--accent-h) 50% 16%);
+  --accent-foreground: #ffffff; --accent-ink: hsl(var(--accent-h) 60% 22%);
 
   /* 整页底色：淡蓝紫径向光 + 上下冷调渐变，模拟图片柔和背景 */
   --bg: #eef0f7;
   --bg-grad:
-    radial-gradient(ellipse 70% 50% at 18% -8%, rgba(165,180,252,.22), transparent 55%),
-    radial-gradient(ellipse 60% 45% at 88% 4%, rgba(196,181,253,.18), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 18% -8%, hsl(var(--accent-h) var(--accent-s) 78% / .22), transparent 55%),
+    radial-gradient(ellipse 60% 45% at 88% 4%, hsl(var(--accent-h) 90% 80% / .18), transparent 55%),
     linear-gradient(180deg, #f4f5fb 0%, #eef0f7 55%, #e7eaf3 100%);
   --surface: #ffffff;
   --panel: #ffffff;
@@ -283,11 +285,11 @@
   --border: rgba(15,23,42,.06); --border-strong: rgba(15,23,42,.12);
   --text: #1f2535; --muted: #6b7388;
 
-  --primary: hsl(243 75% 60%); --primary-2: hsl(243 70% 72%);
+  --primary: hsl(var(--accent-h) var(--accent-s) 60%); --primary-2: hsl(var(--accent-h) 70% 72%);
   /* primary-soft 提强，让 active 项底色更显眼（对应图片里"Do"高亮态） */
-  --primary-soft: hsl(243 75% 92% / .55); --primary-soft-strong: hsl(243 80% 88% / .75);
-  --primary-grad: linear-gradient(135deg, #a5b4fc 0%, #6366f1 55%, #4f46e5 100%);
-  --primary-glow: hsl(243 75% 60% / .25); --glass-hi: rgba(255,255,255,.95);
+  --primary-soft: hsl(var(--accent-h) var(--accent-s) 92% / .55); --primary-soft-strong: hsl(var(--accent-h) 80% 88% / .75);
+  --primary-grad: linear-gradient(135deg, hsl(var(--accent-h) var(--accent-s) 78%) 0%, hsl(var(--accent-h) var(--accent-s) 60%) 55%, hsl(var(--accent-h) var(--accent-s) 48%) 100%);
+  --primary-glow: hsl(var(--accent-h) var(--accent-s) 60% / .25); --glass-hi: rgba(255,255,255,.95);
 
   --success: #10b981; --success-soft: rgba(16,185,129,.14);
   --success-grad: linear-gradient(135deg,#34d399 0%,#10b981 100%);
@@ -296,9 +298,9 @@
   --danger-grad: linear-gradient(135deg,#ef4444 0%,#dc2626 100%);
 
   /* 阴影更柔更浅，匹配图片里的"飘在白底上" */
-  --shadow: 0 1px 2px rgba(15,23,42,.04), 0 4px 14px rgba(99,102,241,.05);
-  --shadow-lg: 0 10px 32px rgba(99,102,241,.08);
-  --shadow-stack: 0 2px 5px rgba(15,23,42,.03), 0 6px 18px rgba(99,102,241,.05), 0 14px 36px rgba(99,102,241,.06);
+  --shadow: 0 1px 2px rgba(15,23,42,.04), 0 4px 14px rgb(var(--accent-rgb) / .05);
+  --shadow-lg: 0 10px 32px rgb(var(--accent-rgb) / .08);
+  --shadow-stack: 0 2px 5px rgba(15,23,42,.03), 0 6px 18px rgb(var(--accent-rgb) / .05), 0 14px 36px rgb(var(--accent-rgb) / .06);
 }
 
 /* 极简浅色下打通强调色调色盘：clean 固定靛蓝优先级低于显式 [data-accent]，

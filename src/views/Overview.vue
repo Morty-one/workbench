@@ -7,10 +7,12 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { db } from '../db'
 import { ensureDefaultProject } from '../seed'
-import { shiftKeyOf, weekdayOf, isWeekend, isSingleShiftDay, WORKING_SHIFTS, SHIFT_KEYS } from '../shift'
+import { resolveWeekProjectForDate } from '../autoProjects'
+import { shiftKeyOf, weekdayOf, isWeekend, isWorkingDay, isSingleShiftDay, SHIFT_KEYS } from '../shift'
 import { openExternal } from '../utils/localOpen.js'
 import ProjectStack from './ProjectStack.vue'
 import ProjectManager from './ProjectManager.vue'
+import TaskFormModal from '../components/TaskFormModal.vue'
 
 const emit = defineEmits(['goto'])
 
@@ -19,6 +21,8 @@ const projects = ref([])
 const duty = ref([])
 const notes = ref([])
 const shortcuts = ref([])
+// 单人班排除人名（与设置中心-自动化 tab 的 singleShiftExclude 一致；空 = 不排除）
+const singleShiftExclude = ref('')
 const quadColors = reactive({
   'urgent-important': '#ef4444',
   'urgent-notimportant': '#f59e0b',
@@ -52,7 +56,80 @@ async function loadAll() {
   notes.value = n
   shortcuts.value = s
   if (qc && qc.value) Object.assign(quadColors, qc.value)
+  // 单人班排除人名：与设置中心-自动化 tab 的 singleShiftExclude 共享同一份设置
+  const sse = await db.settings.get('singleShiftExclude')
+  singleShiftExclude.value = (sse && sse.value ? String(sse.value) : '').trim()
 }
+/* ---------- 今天要处理：页内快捷新增任务（不跳转，复用 TaskFormModal 公共组件） ---------- */
+const showQuickAdd = ref(false)
+const formInitial = ref({})
+function openQuickAdd() {
+  // 若当前按项目筛选，默认落在被筛选的项目上
+  formInitial.value = {
+    title: '',
+    projectId: selectedProjectId.value || projects.value[0]?.id || null,
+    quadrant: 'noturgent-important',
+    dueTime: '',
+    remindTime: '',
+    remark: '',
+    links: [],
+    subtasks: []
+  }
+  showQuickAdd.value = true
+}
+function closeQuickAdd() {
+  showQuickAdd.value = false
+}
+async function onQuickSubmit(data) {
+  const title = (data.title || '').trim()
+  if (!title) return
+  const d = new Date()
+  const dayBase = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  // 完成时间：填了按当天 HH:MM；没填（含 00:00 这种 0 值）则与任务管理表单同一规则，默认「当前 +60 分钟」。
+  // 默认分支刻意用绝对时间戳而非 dayBase+分钟：跨午夜时基准日会自动顺延到次日，
+  // 否则 23:50 新建会得到「今天 00:50」，一创建就已逾期。
+  // 关键：必须用 dueMin>0 判断，不能只 if (data.dueTime) —— 「00:00」也是 truthy，会走 if 分支得到 followUpAt=0（命中原因同 Tasks.vue 已有的同款隐患）。
+  let followUpAt = 0
+  const dueMin = timeToMinutes(data.dueTime)
+  if (data.dueTime && dueMin > 0) {
+    followUpAt = dayBase + dueMin * 60000
+  } else {
+    followUpAt = Date.now() + 60 * 60000
+  }
+  const plainSubtasks = JSON.parse(JSON.stringify(data.subtasks || []))
+    .filter((s) => (s.text || '').trim())
+    .map((s) => ({
+      id: s.id || String(Date.now()) + Math.random().toString(36).slice(2),
+      text: s.text.trim(),
+      done: !!s.done,
+      dueTime: (s.dueTime || '').trim(),
+      remindTime: (s.remindTime || '').trim(),
+      links: (s.links || []).filter((l) => (l && (l.url || '')).trim()).map((l) => ({ url: (l.url || '').trim(), label: (l.label || '打开').trim() || '打开' }))
+    }))
+  const plainLinks = (data.links || [])
+    .filter((l) => (l && (l.url || '')).trim())
+    .map((l) => ({ url: (l.url || '').trim(), label: (l.label || '打开').trim() || '打开' }))
+  await db.tasks.add({
+    title,
+    projectId: data.projectId || projects.value[0]?.id || null,
+    quadrant: data.quadrant,
+    status: '待办',
+    followUpAt,
+    // 与 Tasks.vue 语义保持一致：未单独设提醒时间时，提醒时间 = 完成时间。
+    // 不能写 0 —— 下游用的是 || 取值链，0 会被当空值穿透，但历史库里已写入的 0 无法回溯。
+    nextRemindAt: followUpAt,
+    dayKey: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+    remark: data.remark || '',
+    links: plainLinks,
+    subtasks: plainSubtasks,
+    createdAt: Date.now()
+  })
+  showQuickAdd.value = false
+  await loadAll()
+  // 通知其它视图（任务管理）同步刷新
+  window.dispatchEvent(new Event('task-updated'))
+}
+
 function quadColor(key) {
   return quadColors[key] || quadColors['noturgent-notimportant']
 }
@@ -103,7 +180,9 @@ const dateText = computed(() => {
 })
 
 /* ---------- 今天要处理（铁律 5） ---------- */
-const dueOf = (t) => t.nextRemindAt ?? t.followUpAt ?? 0
+// 注意：这里必须用 || 而不是 ?? —— nextRemindAt 会被显式写入 0（无提醒时间），
+// 而 ?? 只穿透 null/undefined，不穿透 0，会导致到期时间恒为 0、时间显示为空。
+const dueOf = (t) => t.nextRemindAt || t.followUpAt || 0
 const todoToday = computed(() => {
   const nowTs = now.value.getTime()
   const end = todayStart.value + DAY
@@ -248,7 +327,8 @@ async function completeCollection(t) {
  * 触发条件为「星期 + 当日班次 + 人员」三重匹配，任一不满足就不生成。
  * 班次来自日程表（duty）导入的排班原文，映射规则见 src/shift.js。
  * 当天在排班表中查不到该人的任何记录 → 视为休班（与日程页的休班推导口径一致）。
- * 生成时机：早 9 点。9 点前打开只挂一个定时器，到点再补；9 点后打开立即补齐。
+ * 生成时机：每条规则可配置「生成钟点」genHour（默认 9）。当前钟点 < 该规则 genHour 时跳过该规则并挂定时器到点再补；
+ * force=true（手动立即生成）跳过所有时间门槛。9 点不再是全局写死，改由各规则自行设定。
  */
 const GEN_HOUR = 9
 let genTimer = null
@@ -278,7 +358,10 @@ function dateInRange(dateStr, startStr, endStr) {
 }
 function migrateRuleForGen(r) {
   if (!r) return r
-  const migrated = { weekdays: [], shifts: [], url: '', ...r }
+  const migrated = { weekdays: [], shifts: [], url: '', freq: 'weekly', monthDays: [], projectId: null, genHour: 9, ...r }
+  // 频率：仅 'monthly' 走按月日期匹配，其余一律按星期（含旧规则无 freq 字段）
+  if (migrated.freq !== 'monthly') migrated.freq = 'weekly'
+  if (!Array.isArray(migrated.monthDays)) migrated.monthDays = []
   // 旧规则用单 shift 字符串，新规则用 shifts 多选数组（空 = 不限）
   // 关键：shifts 为空数组时也要回退到 r.shift —— 否则早期规则会被当作「不限」生成
   if (!Array.isArray(migrated.shifts) || migrated.shifts.length === 0) {
@@ -311,12 +394,20 @@ function migrateRuleForGen(r) {
 function matchShifts(wants, ctx) {
   // ctx: { today, shiftKey, person, onDuty, excludePerson, weekend }
   if (!wants.length) return ctx.shiftKey || '不限'
+  // 「上班」判定按用户 2026-09-01 口径：班表里只要排了班，不管什么班次都算上班；
+  // 只有休班不算（班表里留空 = 没排班 = 休班）。
+  // 所以用黑名单（!== '休班'），不用 WORKING_SHIFTS 白名单——白名单会漏掉名单外的班次写法。
+  const isOnDuty = ctx.shiftKey !== '休班'
   const hits = []
   for (const want of wants) {
     if (want === '所有上班的班次') {
-      if (WORKING_SHIFTS.includes(ctx.shiftKey)) hits.push(want)
+      // 只看班表：不看周几、不看法定节假日。周末、国庆只要班表排了班就算上班。
+      if (isOnDuty) hits.push(want)
     } else if (want === '工作日班') {
-      if (!ctx.weekend && WORKING_SHIFTS.includes(ctx.shiftKey)) hits.push(want)
+      // 两层都要满足：
+      //   ① 今天是法定工作日（按国务院办公厅放假通知口径，含调休补班的周末）
+      //   ② 班表里今天排了班
+      if (isWorkingDay(ctx.today) && isOnDuty) hits.push(want)
     } else if (want === '单人班') {
       if (ctx.onDuty.includes(ctx.person) && isSingleShiftDay(ctx.today, ctx.onDuty, ctx.excludePerson)) hits.push(want)
     } else if (want === ctx.shiftKey) {
@@ -331,6 +422,29 @@ function matchShifts(wants, ctx) {
   return hits[0]
 }
 
+// 判断「规则在 dayKey 当天按当前排班本应生成」——供孤儿自动任务清理对账用（2026-09-03 加）。
+// 只校验频率维度（monthly 看 dom 是否命中 monthDays；weekly 看星期是否命中 weekdays，
+// weekdays 为空 = 每天），不校验班次/是否在班：因为一条合法生成的任务的 dayKey 必然落在规则排班内，
+// 只有「规则改过 / 历史某版频率判定有 bug 生成」的任务才会出现 dayKey 不在排班内的情况。
+function shouldGenerateForDay(rule, dayKey) {
+  if (!rule || !dayKey) return true
+  if (rule.freq === 'monthly') {
+    const md = rule.monthDays || []
+    if (!md.length) return false // 配置异常：月频未选日期
+    const d = new Date(`${dayKey}T00:00:00`)
+    if (Number.isNaN(d.getTime())) return true
+    const dom = d.getDate()
+    const dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
+    return md.some((x) => Math.min(Number(x) || 0, dim) === dom)
+  }
+  if (rule.freq === 'weekly') {
+    const wds = Array.isArray(rule.weekdays) ? rule.weekdays : []
+    if (!wds.length) return true // 每天
+    return wds.includes(weekdayOf(dayKey))
+  }
+  return true
+}
+
 async function ensurePeriodicTasks(force = false) {
   if (genRunning) {
     genQueued = true
@@ -338,37 +452,40 @@ async function ensurePeriodicTasks(force = false) {
   }
   genRunning = true
   try {
+  // 生成审计日志（2026-09-05 加）：本轮每条规则×人的判定先入内存 buffer，结束后一次性写库，
+  // 供事后回放「某条任务生成/未生成那一刻系统看到的完整上下文」，定位班次/频率不一致等异常。
+  const auditBuffer = []
+  const pushAudit = (entry) => auditBuffer.push({ ts: Date.now(), ...entry })
   const rawRules = (await db.settings.get('periodicDutyTasks'))?.value || []
   const rules = rawRules.map((r) => migrateRuleForGen(r))
   const active = rules.filter((r) => r.enabled && (r.title || '').trim())
   if (!active.length) return
 
-  // 未到早 9 点：挂定时器，到点再生成（页面保持打开时生效；关掉了下次打开也会补）
-  // force=true（手动「立即生成」）时跳过时间门槛，直接按当前规则生成
+  // 生成钟点门槛（2026-09-07 起按规则可配置：rule.genHour，默认 9）：
+  // 某条规则「当前钟点 < 该规则 genHour」则本轮跳过该规则，并登记最早待触发时间，
+  // 循环结束后为它挂一个到点定时器（下轮 ensurePeriodicTasks 重新判定并生成）。
+  // force=true（手动「立即生成」）时跳过所有时间门槛，直接按当前规则生成。
+  // 页面保持打开时定时器生效；关掉后下次打开也会按当前钟点重新判定。
   const nowDate = now.value
-  if (!force && nowDate.getHours() < GEN_HOUR) {
-    if (!genTimer) {
-      const fireAt = new Date(nowDate)
-      fireAt.setHours(GEN_HOUR, 0, 5, 0)
-      genTimer = setTimeout(() => {
-        genTimer = null
-        ensurePeriodicTasks()
-      }, Math.max(1000, fireAt.getTime() - nowDate.getTime()))
-    }
-    return
-  }
+  const nowMs = nowDate.getTime()
+  let pendingFireMs = Infinity
 
   const defaultId = await ensureDefaultProject()
   const today = todayKey.value
   const wd = weekdayOf(today)
   const me = ((await db.settings.get('currentPerson'))?.value || '').trim()
-  const excludePerson = ((await db.settings.get('singleShiftExclude'))?.value || '').trim()
+  const excludePerson = singleShiftExclude.value  // 已在 loadAll 中读取，避免重复 IO
   const todayRecords = duty.value.filter((d) => d.date === today)
   // 当天在班（非休班）人员名单，供「单人班」判定
   const onDuty = todayRecords
     .filter((d) => {
-      const k = shiftKeyOf(d.shift, today)
-      return k !== '休班' && k !== '其他' && (d.person || '').trim()
+      // 留空 = 没排班 = 休班（与下方 rawShiftKey 口径保持一致）。
+      // ⚠️ 必须显式判空：shiftKeyOf('') 返回的是「其他」而不是「休班」，
+      //    不判空的话休班的人会被算进在班名单，导致「当天只有 1 人上班」永远判不出单人班。
+      const k = String(d.shift || '').trim() ? shiftKeyOf(d.shift, today) : '休班'
+      // 「其他」也要计入在班人数：系统认不出的班次写法，只要班表排了班就算在班
+      // （用户 2026-09-02 确认口径）。否则这类写法会让单人班漏判。
+      return k !== '休班' && (d.person || '').trim()
     })
     .map((d) => (d.person || '').trim())
   const existing = await db.tasks.toArray()
@@ -384,18 +501,62 @@ async function ensurePeriodicTasks(force = false) {
   const todayBase = new Date(`${today}T00:00:00`).getTime()
 
   for (const rule of active) {
+    // 生成钟点门槛（按规则）：未到该规则的 genHour 则跳过本轮，并登记最早待触发时间
+    const gh = Number.isFinite(rule.genHour) ? rule.genHour : GEN_HOUR
+    if (!force && nowDate.getHours() < gh) {
+      const fireAt = new Date(nowDate)
+      fireAt.setHours(gh, 0, 5, 0)
+      const delta = fireAt.getTime() - nowMs
+      if (delta > 0 && delta < pendingFireMs) pendingFireMs = delta
+      reasons.add('未到生成钟点')
+      pushAudit({ action: '跳过规则', ruleId: rule.id, ruleTitle: rule.title, dayKey: today, reason: `未到生成钟点(${gh}点)`, onDuty, excludePerson })
+      continue
+    }
+
     // ① 时间范围
     const dr = rule.dateRange || {}
     if (!dateInRange(today, dr.start, dr.end)) {
       reasons.add('不在日期范围')
+      pushAudit({ action: '跳过规则', ruleId: rule.id, ruleTitle: rule.title, dayKey: today, reason: '不在日期范围', onDuty, excludePerson })
       continue
     }
 
-    // ② 星期匹配（不选 = 每天）
-    const wds = Array.isArray(rule.weekdays) ? rule.weekdays : []
-    if (wds.length && !wds.includes(wd)) {
-      reasons.add('今天非指定星期')
-      continue
+    // ② 触发频率匹配
+    if (rule.freq === 'monthly') {
+      // 按月：匹配「日」维度。半月默认 15 号 + 月末；月末用 31 在 30 天月自动 clamp 到月末
+      const td = new Date(`${today}T00:00:00`)
+      const dom = td.getDate()
+      const dim = new Date(td.getFullYear(), td.getMonth() + 1, 0).getDate()
+      const hitMonth = (rule.monthDays || []).some((md) => {
+        const target = Math.min(Number(md) || 0, dim)
+        return dom === target
+      })
+      if (!hitMonth) {
+        reasons.add('今天非指定日期')
+        pushAudit({ action: '跳过规则', ruleId: rule.id, ruleTitle: rule.title, dayKey: today, reason: '今天非指定日期(monthly)', onDuty, excludePerson })
+        continue
+      }
+    } else {
+      // 按星期（不选 = 每天）
+      const wds = Array.isArray(rule.weekdays) ? rule.weekdays : []
+      if (wds.length && !wds.includes(wd)) {
+        reasons.add('今天非指定星期')
+        pushAudit({ action: '跳过规则', ruleId: rule.id, ruleTitle: rule.title, dayKey: today, reason: '今天非指定星期(weekly)', onDuty, excludePerson })
+        continue
+      }
+    }
+
+    // ②-b 目标项目：规则指定了 projectId 则优先使用；若该指定项目开启了自动子项目，
+    // 则挂载到「今天」对应的周子项目下（需求 9+10）。否则回退默认项目。
+    let targetProjectId = defaultId
+    if (rule.projectId) {
+      const proj = await db.projects.get(rule.projectId)
+      if (proj && proj.autoChildren) {
+        const wid = await resolveWeekProjectForDate(rule.projectId, today)
+        if (wid) targetProjectId = wid
+      } else if (proj) {
+        targetProjectId = proj.id
+      }
     }
 
     // ③ 人员：规则指定多人员，未指定则用「当前用户」
@@ -416,9 +577,16 @@ async function ensurePeriodicTasks(force = false) {
       const person = who.trim()
       if (!person) continue
 
-      // ④ 班次：查当天排班；查不到记录 = 休班。多选班次任一命中即生成，并记录命中的班次标签
+      // ④ 班次：查当天排班；查不到记录 = 休班。
+      // 先取原始班次，再用「今日是否单人班」校正为有效班次（单人班 > 原始 key），
+      // 避免单人班日仍以「主班/副班」名义触发或生成。
       const rec = todayRecords.find((d) => (d.person || '').includes(person))
-      const shiftKey = rec ? shiftKeyOf(rec.shift, today) : '休班'
+      // 有记录但班次留空 = 没排班 = 休班（用户班表里不写「休」字，留空即休班）。
+      // 不能让 shiftKeyOf('') 落到「其他」，否则 matchShifts 的黑名单（!== '休班'）会把它误判成上班。
+      const rawShiftKey = rec && String(rec.shift || '').trim() ? shiftKeyOf(rec.shift, today) : '休班'
+      // 「其他」也参与单人班校正（同上：班表排了班就算在班，不该被排除）
+      const isSingle = rawShiftKey !== '休班' && isSingleShiftDay(today, onDuty, excludePerson)
+      const shiftKey = isSingle ? '单人班' : rawShiftKey
       const matchedShift = matchShifts(rule.shifts || [], {
         today,
         shiftKey,
@@ -429,6 +597,7 @@ async function ensurePeriodicTasks(force = false) {
       })
       if (!matchedShift) {
         reasons.add(rec ? `班次未匹配(${shiftKey})` : '排班表未导入/当天无排班')
+        pushAudit({ action: '跳过', ruleId: rule.id, ruleTitle: rule.title, person, dayKey: today, reason: rec ? `班次未匹配(${shiftKey})` : '排班表未导入/当天无排班', onDuty, excludePerson, rawShiftKey, isSingle, shiftKey, matched: null })
         continue
       }
 
@@ -444,6 +613,7 @@ async function ensurePeriodicTasks(force = false) {
         )
       if (already) {
         reasons.add('今日已生成')
+        pushAudit({ action: '跳过', ruleId: rule.id, ruleTitle: rule.title, person, dayKey: today, reason: '今日已生成(去重)', onDuty, excludePerson, rawShiftKey, isSingle, shiftKey, matched: matchedShift })
         continue
       }
 
@@ -465,7 +635,7 @@ async function ensurePeriodicTasks(force = false) {
 
       await db.tasks.add({
         title: rule.title,
-        projectId: defaultId,
+        projectId: targetProjectId,
         quadrant: rule.quadrant || 'noturgent-important',
         status: '待办',
         followUpAt,
@@ -498,8 +668,17 @@ async function ensurePeriodicTasks(force = false) {
       })
       seen.add(dedupKey)
       created++
+      pushAudit({ action: '生成', ruleId: rule.id, ruleTitle: rule.title, person, dayKey: today, reason: '正常生成', onDuty, excludePerson, rawShiftKey, isSingle, shiftKey, matched: matchedShift, followUpAt, nextRemindAt })
     }
   }
+  // 为尚未到达生成钟点的规则挂一个最早到点定时器（下轮 ensurePeriodicTasks 重新判定并生成）
+  if (pendingFireMs !== Infinity && !genTimer) {
+    genTimer = setTimeout(() => {
+      genTimer = null
+      ensurePeriodicTasks()
+    }, Math.max(1000, pendingFireMs))
+  }
+
   // 清理历史遗留的重复自动任务：同一 (规则+人+天) 仅保留最早一条，避免「今天要处理」出现重复项
   const byKey = new Map()
   for (const t of existing) {
@@ -513,13 +692,43 @@ async function ensurePeriodicTasks(force = false) {
     if (group.length > 1) {
       group.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
       for (const dup of group.slice(1)) {
+        pushAudit({ action: '清理重复', ruleId: dup.autoRuleId, ruleTitle: dup.title, person: dup.autoRulePerson, dayKey: dup.dayKey, reason: '同日同规则同人重复', taskId: dup.id })
         await db.tasks.delete(dup.id)
         pruned = true
       }
     }
   }
 
-  if (created || pruned) await loadAll()
+  // 清理孤儿自动任务：规则仍存在、但其 dayKey 当天按规则「当前排班」本不该生成的自动任务。
+  // 根因（2026-09-03）：历史上某版 ensurePeriodicTasks 频率判定有 bug，把月任务 / 特定星期任务
+  // 无视排班也生成了（如 9/2 出现了 [15,31]、[1,5,9]、周二规则的孤儿任务），或规则后来被改过；
+  // 这些已落库任务从没被清理，且因 followUpAt 早已过期而永久显示「逾期」。
+  // 这里对账清理，使自动任务与规则当前排班保持一致；规则已删除的任务保守不在此清理，避免误删历史。
+  let cleanedOrphans = false
+  for (const t of existing) {
+    if (!t.autoRuleId) continue
+    const r = rules.find((x) => x.id === t.autoRuleId)
+    if (!r) continue // 规则已删：不在此清理
+    if (shouldGenerateForDay(r, t.dayKey)) continue // 仍符合排班：保留
+    console.warn('[ensurePeriodicTasks] 清理孤儿自动任务:', { id: t.id, title: t.title, dayKey: t.dayKey, rule: r.title })
+    pushAudit({ action: '清理孤儿', ruleId: t.autoRuleId, ruleTitle: r.title, person: t.autoRulePerson, dayKey: t.dayKey, reason: '频率与当前排班不符', taskId: t.id })
+    await db.tasks.delete(t.id)
+    cleanedOrphans = true
+  }
+
+  // 本轮生成审计日志一次性落库（保留最近 200 条，超出丢最旧）
+  if (auditBuffer.length) {
+    try {
+      const log = (await db.settings.get('genAuditLog'))?.value || []
+      const merged = [...log, ...auditBuffer]
+      if (merged.length > 200) merged.splice(0, merged.length - 200)
+      await db.settings.put({ key: 'genAuditLog', value: merged })
+    } catch (e) {
+      console.warn('[genAudit] 日志写入失败', e)
+    }
+  }
+
+  if (created || pruned || cleanedOrphans) await loadAll()
 
   // 若有因「触发时间已过」而跳过的规则，预约次日早 9 点重新生成；跨天后 todayKey 自然刷新，再执行生成
   if (skippedDueToPassedTrigger && !genTimer) {
@@ -593,13 +802,16 @@ const dutyTopbar = computed(() => {
   const recs = duty.value
     .filter((d) => d.date === targetKey)
     .filter((d) => {
-      const k = shiftKeyOf(d.shift, d.date)
-      return k !== '休班' && k !== '其他'
+      // 留空 = 休班，不显示（与 onDuty 口径一致）。
+      // ⚠️ 必须显式判空：shiftKeyOf('') 返回「其他」，不判空的话休班的人也会出现在值班条。
+      const k = String(d.shift || '').trim() ? shiftKeyOf(d.shift, d.date) : '休班'
+      // 「其他」也显示：班表排了班就该出现在顶部值班条
+      return k !== '休班'
     })
   return recs.map((d) => {
     const key = shiftKeyOf(d.shift, d.date)
     const names = recs.map((r) => r.person)
-    const single = isSingleShiftDay(d.date, names, '卢敬华')
+    const single = isSingleShiftDay(d.date, names, singleShiftExclude.value)
     return {
       person: d.person,
       // 单人班时覆盖原班次名；否则只保留主班/副班/周末白班，不带括号时段
@@ -708,6 +920,14 @@ function toggleEditShortcuts() {
 async function onProjectsChanged() {
   showProjMgr.value = false
   await loadAll()
+  // 项目管理里可能删了项目（删除是级联的，会连整棵子树一起删）⇒ 若当前筛选的项目已不存在，
+  // 必须清掉筛选；否则任务列表会按一个「已删项目的 id」过滤，整页显示成空的。
+  if (
+    selectedProjectId.value != null &&
+    !projects.value.some((p) => p.id === selectedProjectId.value)
+  ) {
+    selectedProjectId.value = null
+  }
 }
 </script>
 
@@ -782,6 +1002,9 @@ async function onProjectsChanged() {
               {{ selectedProjectName }}
               <svg viewBox="0 0 24 24" width="12" height="12"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             </button>
+            <button class="ghost sm quick-add-btn" title="在总览页直接新增任务" @click="openQuickAdd">
+              <span>新增</span>
+            </button>
             <button class="ghost sm" @click="emit('goto', 'tasks')">全部任务</button>
           </div>
         </div>
@@ -816,7 +1039,7 @@ async function onProjectsChanged() {
                   <div v-if="allLinks(t).length && !hasSubs(t)" class="todo-links">
                     <a v-for="(u, ui) in allLinks(t)" :key="ui" class="ghost sm todo-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u.url, $event)">
                       <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
-                      {{ u.label }}{{ allLinks(t).length > 1 ? (ui + 1) : '' }}
+                      {{ u.label }}
                     </a>
                   </div>
                 </div>
@@ -830,7 +1053,7 @@ async function onProjectsChanged() {
                     <span v-if="subOverdue(s, t)" class="badge-over sm">逾期</span>
                     <span class="sub-actions">
                       <span v-if="allLinksOfSub(s).length" class="sub-link-group">
-                        <a v-for="(u, ui) in allLinksOfSub(s)" :key="ui" class="sub-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u.url, $event)">{{ u.label }}{{ allLinksOfSub(s).length > 1 ? (ui + 1) : '' }}↗</a>
+                        <a v-for="(u, ui) in allLinksOfSub(s)" :key="ui" class="sub-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u.url, $event)">{{ u.label }}↗</a>
                       </span>
                       <button class="ghost sm" @click="snoozeTask(t.id, 60)" title="推迟此任务">推迟</button>
                     </span>
@@ -896,11 +1119,28 @@ async function onProjectsChanged() {
       </div>
     </section>
 
+    <!-- 总览页内快捷新增任务：不跳转，复用 TaskFormModal 公共组件（与任务管理字段一致） -->
+    <TaskFormModal
+      :show="showQuickAdd"
+      :projects="projects"
+      :editing-id="null"
+      :initial-data="formInitial"
+      @update:show="showQuickAdd = $event"
+      @submit="onQuickSubmit"
+    />
+
     <ProjectManager v-if="showProjMgr" :tasks="tasks" @close="showProjMgr = false" @changed="onProjectsChanged" />
   </div>
 </template>
 
 <style scoped>
+/* 总览页快捷新增任务弹窗 */
+.quick-add-modal { max-width: 460px; }
+.qa-label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+.qa-input { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font-size: 14px; font-family: inherit; }
+.qa-row { display: flex; gap: 10px; }
+.qa-col { flex: 1; min-width: 0; }
+.qa-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .ov {
   display: flex;
   flex-direction: column;
@@ -1640,6 +1880,28 @@ async function onProjectsChanged() {
   /* 手机端不显示项目文档，只聚焦今日要处理（问题3 用户要求） */
   .ov-proj {
     display: none !important;
+  }
+  /* 手机端首屏要让「今天要处理」露头：hero 收紧内距、缩问候语字号 */
+  .hero {
+    padding: 12px;
+    gap: 10px;
+  }
+  .hero-greet {
+    font-size: 17px;
+  }
+  .hero-date {
+    font-size: 12px;
+  }
+  /* hero 右下那颗「N 项待处理」与顶部数字条信息重复，手机端去掉，把纵向空间让给待办列表 */
+  .hero-badge {
+    display: none !important;
+  }
+  /* 区块间距一并收紧 */
+  .ov {
+    gap: 10px;
+  }
+  .ov-grid {
+    gap: 10px;
   }
 }
 

@@ -50,6 +50,14 @@ export async function openExternal(url) {
     }
   } catch (err) {
     console.warn('[localOpen] bridge failed, falling back to browser:', err.message)
+    // Surface the failure to the user (App.vue listens and shows a top bar); the
+    // previous silent window.open fallback made a dead bridge look like "nothing
+    // happens when I click the link".
+    try {
+      window.dispatchEvent(new CustomEvent('wb:open-fail', {
+        detail: { url: u, target, error: (err && err.message) || 'bridge unreachable' }
+      }))
+    } catch {}
     // Last-resort fallback: some browsers can handle a file:// or app link natively.
     window.open(u, '_blank')
   }
