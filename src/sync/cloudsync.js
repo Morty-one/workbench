@@ -22,9 +22,16 @@ import { addSyncLog } from './synclog'
 //    改写成还原前的旧 dirtyAt（实测回退 5 天）。现已由两处改动治掉：
 //      ① restoreSnapshot() 还原后把 dirtyAt 对齐到快照时间戳 ⇒ 第二趟不再误判「本端较新」；
 //      ② syncOnce() 新增「无需推送」判定：远端 == 本端已确认版本且本端无未推送改动时，直接跳过 push。
-//    ⇒ 打开工作台只拉不推；本端确有未推送改动（localAhead）时仍然照旧推送，这条不能丢
-//      （autoPush 关闭期间，它是本机改动自动上云的唯一通道）。
-export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: true }
+//    ⇒ 打开工作台只拉不推；本端确有未推送改动（localAhead）时仍会推送（第 39 轮当时的设计）。
+// ⚠️ 第 40 轮（2026-09-20 晚，用户定案）：「打开永远只拉，改动一律手动推」。
+//    新增 bootPush:false ⇒ **boot 这一趟不做任何上传**，连 localAhead、以及「云端还没有快照（首次 seed）」
+//    都不推；boot 只剩「拉取 / 还原」两个动作。要上传只有两条路：
+//      ① 设置中心「立即同步」（manual）② 每日定时同步（scheduled，需应用当时开着）。
+//    代价（已与用户确认）：云端为空时打开不会 seed，须手动点一次「立即同步」；
+//    本端改完既没点手动、又错过 17:30（或那时没开机）⇒ 改动只在本地，云端不更新。
+//    实现位置：syncOnce() 里「3.5) boot 禁推」判定，插在 push 之前 ⇒ 全模块仅有的两处 PUT
+//    （主推送 + 409 重试）在 boot 下都够不到，**无需另外去堵 409 分支**。
+export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: true, bootPush: false }
 
 const SYNC_TABLES = ['tasks', 'folders', 'notes', 'shortcuts', 'duty', 'settings', 'projects']
 // 可勾选的同步模块（设置中心以“类”为单位勾选，内部展开为具体表）
@@ -227,6 +234,22 @@ async function syncOnce(reason, tablesArg) {
     emit()
     return { restored: false, skipped: true }
   }
+  // 3.5) boot 禁推（第 40 轮·用户 2026-09-20 定案）：「打开工作台永远只拉，改动一律手动推」
+  //      打开时的自动同步不再承担任何上传动作 —— **包括**上面 localAhead（本端有未推送改动）
+  //      与「云端还没有快照（首次 seed）」这两种情况。走到这里说明「确实有东西可以推」，但 boot 不推。
+  //      ⚠️ 因此第 4 步那次 PUT、以及它 409 重试分支里的第二次 PUT，在 boot 下一律够不到
+  //         （全模块只有这两处 PUT，都在本判定之后）。将来若改动位置，务必重新确认这一点。
+  if (reason === 'boot' && !AUTO_SYNC_FEATURES.bootPush) {
+    state.lastSyncAt = Date.now()
+    state.lastResult = remoteSnap
+      ? (localAhead
+        ? '本端有未上传的改动；打开时只拉取不上传，请点「立即同步」上传'
+        : '已是最新（打开只拉取，不上传）')
+      : '云端还没有快照；打开时不上传，本端数据请点「立即同步」上传'
+    state.lastError = ''
+    emit()
+    return { restored: false, skipped: true }
+  }
   // 4) push（仅推送本次勾选的表）
   const enc = await encryptData(localSnap, cfg.pw)
   const b64 = utf8ToB64(JSON.stringify(enc))
@@ -283,15 +306,17 @@ export async function runSync(reason = 'manual', opts = {}) {
   syncing = true
   const startedAt = Date.now()
   const tables = expandModules((opts && opts.modules && opts.modules.length) ? opts.modules : cfg.modules)
+  // 第 40 轮：执行记录里带上触发设备（PC / 手机）—— 多端共用云端快照，日志必须能分辨是谁做的
+  const dev = deviceType()
   try {
     const r = await syncOnce(reason, tables)
     pulledInSession = true
     ready = true
     // 执行记录：一次同步只记一条，结果文案直接用状态里的 lastResult（推送/拉取都由它描述）
-    addSyncLog(reason, { ok: true, result: state.lastResult || '已同步 ✓', startedAt })
+    addSyncLog(reason, { ok: true, result: state.lastResult || '已同步 ✓', startedAt, device: dev })
     return r
   } catch (e) {
-    addSyncLog(reason, { ok: false, error: e && e.message ? e.message : String(e), startedAt })
+    addSyncLog(reason, { ok: false, error: e && e.message ? e.message : String(e), startedAt, device: dev })
     throw e
   } finally {
     syncing = false
@@ -356,8 +381,9 @@ async function attemptBoot() {
   pulledInSession = true
   if (r && r.restored) {
     // 整库已换血：刷新页面让所有视图重新加载
-    // ⚠️ 刷新后 boot 会再跑一趟；那一趟由第 39 轮的「无需推送」判定兜住（此时远端 == 本端已确认版本、
-    //    且还原已把 dirtyAt 对齐 ⇒ 不再回推整库，也不会把云端快照时间戳改写回旧值）。
+    // ⚠️ 刷新后 boot 会再跑一趟。那一趟由两道判定兜住：
+    //    ① 第 39 轮「无需推送」判定（远端 == 本端已确认版本、且还原已把 dirtyAt 对齐）；
+    //    ② 第 40 轮「boot 禁推」判定（打开时一律不 PUT）—— 现在这层是主要保险。
     setTimeout(() => location.reload(), 150)
   }
 }
@@ -404,12 +430,13 @@ export async function bootCloudSync() {
 export async function testCloudConnection() {
   const be = backend()
   const startedAt = Date.now()
+  const dev = deviceType()   // 第 40 轮：记录里标注是哪台设备点的「测试连接」
   try {
     await be.verify()
-    addSyncLog('test', { ok: true, result: '连接正常：仓库可读、令牌有效', startedAt })
+    addSyncLog('test', { ok: true, result: '连接正常：仓库可读、令牌有效', startedAt, device: dev })
     return true
   } catch (e) {
-    addSyncLog('test', { ok: false, error: e && e.message ? e.message : String(e), startedAt })
+    addSyncLog('test', { ok: false, error: e && e.message ? e.message : String(e), startedAt, device: dev })
     throw e
   }
 }

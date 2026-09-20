@@ -5,7 +5,7 @@ import { encryptData, decryptData } from '../crypto'
 import { configureSync, forceSync } from '../autosync'
 import { isIOS } from '../env'
 import { configureCloud, configureSchedule, runSync, onCloudState, testCloudConnection, getCloudState, SYNC_MODULES } from '../sync/cloudsync'
-import { loadSyncLog, clearSyncLog, SYNC_LOG_HEAD } from '../sync/synclog'
+import { loadSyncLog, clearSyncLog, SYNC_LOG_HEAD, deviceLabelOf } from '../sync/synclog'
 import { ensureDefaultProject } from '../seed'
 import { SHIFT_OPTIONS, WEEKDAY_LABELS, weekdayText } from '../shift'
 import * as XLSX_NS from 'xlsx-js-style'
@@ -421,7 +421,10 @@ function clearSyncLogs() {
 const syncLogStats = computed(() => {
   const total = syncLogs.value.length
   const success = syncLogs.value.filter(l => l.ok).length
-  return { total, success, fail: total - success }
+  // 第 40 轮：多端共用云端快照，记录里拆分 PC / 手机（旧记录没有这个字段 ⇒ 归入「未记录」）
+  const pc = syncLogs.value.filter(l => l.device === 'pc').length
+  const mobile = syncLogs.value.filter(l => l.device === 'mobile').length
+  return { total, success, fail: total - success, pc, mobile, unknown: total - pc - mobile }
 })
 const syncLogTotalPages = computed(() => Math.max(1, Math.ceil(syncLogs.value.length / syncLogPageSize.value)))
 const pagedSyncLogs = computed(() => {
@@ -473,25 +476,27 @@ function exportSyncLogXlsx() {
   if (!syncLogs.value.length) return
   const titleLines = [
     '云端同步执行记录',
-    '记录范围：测试连接 / 手动同步 / 每日定时同步 / 打开时自动拉取（最多保留 200 条）',
-    '说明列：成功时为同步判定结果（推送 / 从云端还原 / 本地较新），失败时为真实失败原因'
+    '记录范围：测试连接 / 手动同步 / 每日定时同步 / 打开时自动同步（打开时只拉取、不推送）；最多保留 200 条',
+    '设备列：本条记录由 PC 还是手机发起（第 40 轮新增；旧记录显示「未记录」）',
+    '说明列：成功时为同步判定结果（推送 / 从云端还原 / 本地较新 / 打开只拉取），失败时为真实失败原因'
   ]
   const head = SYNC_LOG_HEAD
   const rows = syncLogs.value.map((l) => [
     fmtFull(l.at),
     fmtFull(l.endedAt),
+    deviceLabelOf(l),
     l.triggerLabel,
     l.ok ? '成功' : '失败',
     l.ok ? (l.result || '') : (l.error || '')
   ])
-  const aoa = [[titleLines.join('\n'), '', '', '', ''], head, ...rows]
+  const aoa = [[titleLines.join('\n'), '', '', '', '', ''], head, ...rows]
   const ws = XLSX.utils.aoa_to_sheet(aoa)
   const lastRow = aoa.length - 1
-  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 4 } }]
-  ws['!cols'] = [colW(20), colW(20), colW(12), colW(8), colW(52)]
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 5 } }]
+  ws['!cols'] = [colW(20), colW(20), colW(9), colW(12), colW(8), colW(52)]
   ws['!rows'] = [{ hpt: titleLines.length * 15 + 8 }]
   for (let r = 0; r <= lastRow; r++) {
-    for (let c = 0; c < 5; c++) {
+    for (let c = 0; c < 6; c++) {
       const addr = XLSX.utils.encode_cell({ r, c })
       let cell = ws[addr]
       if (!cell) { cell = { t: 's', v: '' }; ws[addr] = cell }
@@ -501,11 +506,11 @@ function exportSyncLogXlsx() {
           ? { horizontal: 'left', vertical: 'center', wrapText: true }
           : r === 1
             ? { horizontal: 'center', vertical: 'center', wrapText: true }
-            : { horizontal: c <= 3 ? 'center' : 'left', vertical: 'center', wrapText: c === 4 }
+            : { horizontal: c <= 4 ? 'center' : 'left', vertical: 'center', wrapText: c === 5 }
       }
     }
   }
-  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: lastRow, c: 4 } })
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: lastRow, c: 5 } })
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, '同步记录')
   const buf = stripEmptyStringCells(XLSX.write(wb, { bookType: 'xlsx', type: 'array' }))
@@ -1302,7 +1307,8 @@ async function clearAll() {
         <h4 class="block-title">云端同步（GitHub 私有库）</h4>
         <p class="muted">
           数据在 GitHub 私有库中以 <code>workbench-data-encrypted.json</code> 形式存储（本地 AES-GCM 加密后上传）。
-          打开工作台时会自动拉取云端最新数据；也可随时点「立即同步」，或等每日定时同步。手机端用同一套设置即可双向同步。
+          打开工作台时<strong>只拉取</strong>云端最新数据、<strong>不上传</strong>；本机改动请点「立即同步」上传，或等每日定时同步。
+          手机端用同一套设置，改动同样点「立即同步」上传（同步记录里会标注是哪台设备做的）。
         </p>
         <div class="cloud-form">
           <div class="set-row">
@@ -1378,18 +1384,22 @@ async function clearAll() {
           <h4 class="block-title">同步记录</h4>
           <div class="log-actions">
             <span class="log-stat muted">共 {{ syncLogStats.total }} 次 · 成功 {{ syncLogStats.success }} · 失败 {{ syncLogStats.fail }}</span>
+            <!-- ⚠️ 设备统计**不能**复用 .log-stat 类：那样 .log-stat 会匹配到 2 个元素，
+                 测试与脚本里的 locator('.log-stat') 会触发 Playwright 严格模式报错。 -->
+            <span class="log-dev-stat muted">PC {{ syncLogStats.pc }} 次 · 手机 {{ syncLogStats.mobile }} 次<span v-if="syncLogStats.unknown"> · 未记录 {{ syncLogStats.unknown }} 次</span></span>
             <button v-if="syncLogs.length" class="ghost sm" @click="exportSyncLogXlsx">导出记录</button>
             <button v-if="syncLogs.length" class="ghost sm" @click="clearSyncLogs">清空记录</button>
           </div>
         </div>
         <p class="muted">
-          记录「测试连接 / 手动同步 / 每日定时同步 / 打开时自动拉取」四类触发的每一次同步结果（最多保留 200 条）。
+          记录「测试连接 / 手动同步 / 每日定时同步 / 打开时自动同步」四类触发的每一次同步结果，并标注这一趟是哪台设备（PC / 手机）做的（最多保留 200 条）。
         </p>
         <div v-if="!syncLogs.length" class="muted">暂无同步记录</div>
         <template v-else>
           <div class="log-list">
             <div v-for="l in pagedSyncLogs" :key="l.id" class="log-row" :class="l.ok ? 'ok' : 'fail'">
               <span class="log-time">{{ fmtLogTime(l.at) }}</span>
+              <span class="log-device" :title="'本次同步由：' + deviceLabelOf(l)">{{ deviceLabelOf(l) }}</span>
               <span class="log-trigger">{{ l.triggerLabel }}</span>
               <span class="log-result">{{ l.ok ? '成功' : '失败' }}</span>
               <span class="log-info" :title="l.ok ? l.result : l.error">{{ l.ok ? l.result : l.error }}</span>
@@ -1883,6 +1893,10 @@ async function clearAll() {
 .log-stat {
   font-size: 12px;
 }
+/* 设备次数拆分（第 40 轮）。⚠️ 类名与 .log-stat 分开：否则 locator('.log-stat') 会撞严格模式 */
+.log-dev-stat {
+  font-size: 12px;
+}
 .log-list {
   margin-top: 8px;
   border: 1px solid var(--border);
@@ -1891,7 +1905,8 @@ async function clearAll() {
 }
 .log-row {
   display: grid;
-  grid-template-columns: 96px 84px 44px minmax(0, 1fr);
+  /* 第 40 轮加第 2 列「设备」（PC / 手机）：时间 | 设备 | 触发方式 | 结果 | 说明 */
+  grid-template-columns: 96px 56px 84px 44px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -1909,6 +1924,17 @@ async function clearAll() {
   border-left-color: var(--danger);
 }
 .log-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* 第 40 轮：设备列（PC / 手机）做成小胶囊，窄屏也不会被挤断 */
+.log-device {
+  justify-self: start;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -1992,9 +2018,9 @@ async function clearAll() {
   z-index: 20;
 }
 @media (max-width: 720px) {
-  /* 手机端：时间 + 触发方式 + 结果 占一行，说明换行到第二行整行铺开，避免挤成 1 个字宽 */
+  /* 手机端：时间 + 设备 + 触发方式 + 结果 占一行，说明换行到第二行整行铺开，避免挤成 1 个字宽 */
   .log-row {
-    grid-template-columns: 88px 1fr auto;
+    grid-template-columns: 82px auto 1fr auto;
     row-gap: 2px;
   }
   .log-info {
