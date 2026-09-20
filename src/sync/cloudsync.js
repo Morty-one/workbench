@@ -8,12 +8,14 @@ import { encryptData, decryptData } from '../crypto'
 import { createGitHubBackend } from './GitHubBackend'
 import { addSyncLog } from './synclog'
 
-// ---- 自动同步方式开关（2026-09-20 用户定案）------------------------------------
-// 用户明确表示这两种方式「现在不要，后续需要再加」，故在此统一关闭：
+// ---- 自动同步方式开关（2026-09-20 定案，当晚二次修订）----------------------------
 //   autoPush:false → 本地改动后不再防抖（3 秒）自动推送；手动「立即同步」与每日定时同步不受影响
-//   bootPull:false → 启动时不再自动拉取远端；仍需手动「立即同步」或等定时同步
-// ⚠️ 代码路径完整保留，**后续要恢复只改这里两个布尔值即可**（不要删下面的逻辑分支）。
-export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: false }
+//   bootPull:true  → 启动（打开工作台）时自动拉取远端。用户 2026-09-20 晚改判：
+//                    要「PC 端推完，手机一打开就是最新」，故重新打开本项。
+// ⚠️ 代码路径完整保留，**改行为只改这里两个布尔值即可**（不要删下面的逻辑分支）。
+// ⚠️ bootPull 的时序很关键：App.vue 里 bootCloudSync() 先于 seedIfEmpty() 执行，
+//    所以新设备启动时 dirtyAt 仍为 0 ⇒ localAhead 不成立 ⇒ 一定会采用远端，不会被种子数据反向覆盖。
+export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: true }
 
 const SYNC_TABLES = ['tasks', 'folders', 'notes', 'shortcuts', 'duty', 'settings', 'projects']
 // 可勾选的同步模块（设置中心以“类”为单位勾选，内部展开为具体表）

@@ -473,7 +473,7 @@ function exportSyncLogXlsx() {
   if (!syncLogs.value.length) return
   const titleLines = [
     '云端同步执行记录',
-    '记录范围：测试连接 / 手动同步 / 每日定时同步（最多保留 200 条）',
+    '记录范围：测试连接 / 手动同步 / 每日定时同步 / 打开时自动拉取（最多保留 200 条）',
     '说明列：成功时为同步判定结果（推送 / 从云端还原 / 本地较新），失败时为真实失败原因'
   ]
   const head = SYNC_LOG_HEAD
@@ -1302,7 +1302,7 @@ async function clearAll() {
         <h4 class="block-title">云端同步（GitHub 私有库）</h4>
         <p class="muted">
           数据在 GitHub 私有库中以 <code>workbench-data-encrypted.json</code> 形式存储（本地 AES-GCM 加密后上传）。
-          同步由「立即同步」按钮或每日定时同步触发。手机端用同一套设置即可双向同步。
+          打开工作台时会自动拉取云端最新数据；也可随时点「立即同步」，或等每日定时同步。手机端用同一套设置即可双向同步。
         </p>
         <div class="cloud-form">
           <div class="set-row">
@@ -1383,7 +1383,7 @@ async function clearAll() {
           </div>
         </div>
         <p class="muted">
-          记录「测试连接 / 手动同步 / 每日定时同步」三类触发的每一次同步结果（最多保留 200 条）。
+          记录「测试连接 / 手动同步 / 每日定时同步 / 打开时自动拉取」四类触发的每一次同步结果（最多保留 200 条）。
         </p>
         <div v-if="!syncLogs.length" class="muted">暂无同步记录</div>
         <template v-else>
