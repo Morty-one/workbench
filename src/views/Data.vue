@@ -5,7 +5,7 @@ import { encryptData, decryptData } from '../crypto'
 import { configureSync, forceSync } from '../autosync'
 import { isIOS } from '../env'
 import { configureCloud, configureSchedule, runSync, onCloudState, testCloudConnection, getCloudState, SYNC_MODULES } from '../sync/cloudsync'
-import { loadSyncLog, clearSyncLog, SYNC_LOG_HEAD, deviceLabelOf } from '../sync/synclog'
+import { loadSyncLog, loadPullLog, clearSyncLog, clearPullLog, SYNC_LOG_HEAD, deviceLabelOf } from '../sync/synclog'
 import { ensureDefaultProject } from '../seed'
 import { SHIFT_OPTIONS, WEEKDAY_LABELS, weekdayText } from '../shift'
 import * as XLSX_NS from 'xlsx-js-style'
@@ -401,16 +401,31 @@ function toggleModule(key, on) {
   cloudModules.value = (cur.length === syncModules.length) ? null : cur
 }
 
-/* ===== 同步记录（localStorage，见 src/sync/synclog.js 顶部注释：不能写 IndexedDB）===== */
+/* ===== 同步记录 / 拉取记录（localStorage，见 src/sync/synclog.js 顶部注释：不能写 IndexedDB）=====
+ * 第 41 轮：两块彻底分家 —— 「同步记录」= 本端主动发起的动作（测试连接 / 手动 / 定时），
+ * 「拉取记录」= 打开工作台时的自动拉取（boot）。各自统计 / 导出 / 清空 / 分页 / 200 条上限，
+ * 互不挤占（起因：boot 每次打开必记，把 200 条队列占满后挤掉了手动记录）。
+ * ⚠️ 两块的 DOM 类名**必须区分**（.log-* 与 .pull-log-*）：同名会让 locator('.log-stat') 之类
+ *    一次匹配到 2 个元素，触发 Playwright 严格模式报错（.log-dev-stat 那次已踩过）。
+ *    CSS 用分组选择器共享视觉值，DOM 里保持两套名字。 */
 const syncLogs = ref([])
 const syncLogPage = ref(1)
 const syncLogPageSize = ref(6)
 const syncLogPageSizeOpen = ref(false)
+const pullLogs = ref([])
+const pullLogPage = ref(1)
+const pullLogPageSize = ref(6)
+const pullLogPageSizeOpen = ref(false)
 
 function refreshSyncLogs() {
   syncLogs.value = loadSyncLog()
   // 记录变少（清空 / 换页大小）时把页码收回有效范围，避免停在空白页
   if (syncLogPage.value > syncLogTotalPages.value) syncLogPage.value = syncLogTotalPages.value
+  refreshPullLogs()
+}
+function refreshPullLogs() {
+  pullLogs.value = loadPullLog()
+  if (pullLogPage.value > pullLogTotalPages.value) pullLogPage.value = pullLogTotalPages.value
 }
 function clearSyncLogs() {
   if (!confirm('确定清空全部同步记录？此操作不影响云端与本地数据。')) return
@@ -418,23 +433,41 @@ function clearSyncLogs() {
   refreshSyncLogs()
   showSaveTip('同步记录已清空')
 }
-const syncLogStats = computed(() => {
-  const total = syncLogs.value.length
-  const success = syncLogs.value.filter(l => l.ok).length
+function clearPullLogs() {
+  if (!confirm('确定清空全部拉取记录？此操作不影响云端与本地数据。')) return
+  clearPullLog()
+  refreshPullLogs()
+  showSaveTip('拉取记录已清空')
+}
+function logStatsOf(list) {
+  const total = list.length
+  const success = list.filter(l => l.ok).length
   // 第 40 轮：多端共用云端快照，记录里拆分 PC / 手机（旧记录没有这个字段 ⇒ 归入「未记录」）
-  const pc = syncLogs.value.filter(l => l.device === 'pc').length
-  const mobile = syncLogs.value.filter(l => l.device === 'mobile').length
+  const pc = list.filter(l => l.device === 'pc').length
+  const mobile = list.filter(l => l.device === 'mobile').length
   return { total, success, fail: total - success, pc, mobile, unknown: total - pc - mobile }
-})
+}
+const syncLogStats = computed(() => logStatsOf(syncLogs.value))
+const pullLogStats = computed(() => logStatsOf(pullLogs.value))
 const syncLogTotalPages = computed(() => Math.max(1, Math.ceil(syncLogs.value.length / syncLogPageSize.value)))
 const pagedSyncLogs = computed(() => {
   const start = (syncLogPage.value - 1) * syncLogPageSize.value
   return syncLogs.value.slice(start, start + syncLogPageSize.value)
 })
+const pullLogTotalPages = computed(() => Math.max(1, Math.ceil(pullLogs.value.length / pullLogPageSize.value)))
+const pagedPullLogs = computed(() => {
+  const start = (pullLogPage.value - 1) * pullLogPageSize.value
+  return pullLogs.value.slice(start, start + pullLogPageSize.value)
+})
 function setSyncLogPageSize(s) {
   syncLogPageSize.value = s
   syncLogPage.value = 1
   syncLogPageSizeOpen.value = false
+}
+function setPullLogPageSize(s) {
+  pullLogPageSize.value = s
+  pullLogPage.value = 1
+  pullLogPageSizeOpen.value = false
 }
 function fmtLogTime(ts) {
   if (!ts) return '-'
@@ -472,16 +505,12 @@ function fmtFull(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-function exportSyncLogXlsx() {
-  if (!syncLogs.value.length) return
-  const titleLines = [
-    '云端同步执行记录',
-    '记录范围：测试连接 / 手动同步 / 每日定时同步 / 打开时自动同步（打开时只拉取、不推送）；最多保留 200 条',
-    '设备列：本条记录由 PC 还是手机发起（第 40 轮新增；旧记录显示「未记录」）',
-    '说明列：成功时为同步判定结果（推送 / 从云端还原 / 本地较新 / 打开只拉取），失败时为真实失败原因'
-  ]
+// 同步记录 / 拉取记录共用一套导出实现（列结构与版式相同，只有标题 / 工作表名 / 文件名不同）
+function exportLogXlsx(list, cfg) {
+  if (!list.length) return
+  const titleLines = cfg.titleLines
   const head = SYNC_LOG_HEAD
-  const rows = syncLogs.value.map((l) => [
+  const rows = list.map((l) => [
     fmtFull(l.at),
     fmtFull(l.endedAt),
     deviceLabelOf(l),
@@ -512,7 +541,7 @@ function exportSyncLogXlsx() {
   }
   ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: lastRow, c: 5 } })
   const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, '同步记录')
+  XLSX.utils.book_append_sheet(wb, ws, cfg.sheet)
   const buf = stripEmptyStringCells(XLSX.write(wb, { bookType: 'xlsx', type: 'array' }))
   const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
   const url = URL.createObjectURL(blob)
@@ -520,12 +549,40 @@ function exportSyncLogXlsx() {
   const d = new Date()
   const p = (n) => String(n).padStart(2, '0')
   a.href = url
-  a.download = `云端同步记录_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.xlsx`
+  a.download = `${cfg.filePrefix}_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.xlsx`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
   setTimeout(() => URL.revokeObjectURL(url), 1000)
-  showSaveTip('已导出 ' + syncLogs.value.length + ' 条同步记录 ✓')
+  showSaveTip('已导出 ' + list.length + ' 条' + cfg.label + ' ✓')
+}
+
+function exportSyncLogXlsx() {
+  exportLogXlsx(syncLogs.value, {
+    sheet: '同步记录',
+    filePrefix: '云端同步记录',
+    label: '同步记录',
+    titleLines: [
+      '云端同步执行记录',
+      '记录范围：测试连接 / 手动同步 / 每日定时同步（打开工作台时的自动拉取记在「拉取记录」里，单独一份）；最多保留 200 条',
+      '设备列：本条记录由 PC 还是手机发起（第 40 轮新增；旧记录显示「未记录」）',
+      '说明列：成功时为同步判定结果（推送 / 从云端还原 / 本地较新），失败时为真实失败原因'
+    ]
+  })
+}
+
+function exportPullLogXlsx() {
+  exportLogXlsx(pullLogs.value, {
+    sheet: '拉取记录',
+    filePrefix: '云端拉取记录',
+    label: '拉取记录',
+    titleLines: [
+      '云端拉取执行记录（打开工作台时的自动拉取）',
+      '记录范围：每次打开工作台时的自动同步（只拉取、不上传）；还原后刷新会并回同一条；最多保留 200 条',
+      '设备列：本条记录由 PC 还是手机发起（第 40 轮新增；旧记录显示「未记录」）',
+      '说明列：成功时为拉取判定结果（已是最新 / 从云端还原 / 本端有未上传的改动），失败时为真实失败原因'
+    ]
+  })
 }
 function syncNow() {
   if (!dirHandle) return alert('请先选择数据目录。')
@@ -1308,7 +1365,7 @@ async function clearAll() {
         <p class="muted">
           数据在 GitHub 私有库中以 <code>workbench-data-encrypted.json</code> 形式存储（本地 AES-GCM 加密后上传）。
           打开工作台时<strong>只拉取</strong>云端最新数据、<strong>不上传</strong>；本机改动请点「立即同步」上传，或等每日定时同步。
-          手机端用同一套设置，改动同样点「立即同步」上传（同步记录里会标注是哪台设备做的）。
+          手机端用同一套设置，改动同样点「立即同步」上传（「同步记录」与「拉取记录」里都会标注是哪台设备做的）。
         </p>
         <div class="cloud-form">
           <div class="set-row">
@@ -1378,7 +1435,8 @@ async function clearAll() {
       </div>
 
       <!-- 同步记录：与「文档输出 · 执行记录」同范式（统计条 + 导出 xlsx + 清空 + 分页 6/页）
-           数据存在 localStorage（wb_synclog_v1）而非 IndexedDB —— 写库会触发自动推送，形成记录↔推送死循环。 -->
+           数据存在 localStorage（wb_synclog_v1）而非 IndexedDB —— 写库会触发自动推送，形成记录↔推送死循环。
+           第 41 轮：与下面的「拉取记录」（wb_synclog_boot_v1）彻底分家，各 200 条、各自统计/导出/清空/分页。 -->
       <div class="data-block sync-log-block">
         <div class="log-head">
           <h4 class="block-title">同步记录</h4>
@@ -1392,7 +1450,7 @@ async function clearAll() {
           </div>
         </div>
         <p class="muted">
-          记录「测试连接 / 手动同步 / 每日定时同步 / 打开时自动同步」四类触发的每一次同步结果，并标注这一趟是哪台设备（PC / 手机）做的（最多保留 200 条）。
+          记录「测试连接 / 手动同步 / 每日定时同步」三类触发的每一次同步结果，并标注这一趟是哪台设备（PC / 手机）做的（最多保留 200 条）。打开工作台时的自动拉取记在下面的「拉取记录」里，与本清单互不挤占。
         </p>
         <div v-if="!syncLogs.length" class="muted">暂无同步记录</div>
         <template v-else>
@@ -1420,6 +1478,52 @@ async function clearAll() {
               </span>
             </div>
             <div v-if="syncLogPageSizeOpen" class="pop-backdrop" @click="syncLogPageSizeOpen = false"></div>
+          </div>
+        </template>
+      </div>
+
+      <!-- 拉取记录（第 41 轮新增）：只装「打开工作台时的自动拉取」（boot）这一种触发，
+           与上面的「同步记录」存放在不同的 localStorage 键里，因此不会被打开动作挤占。
+           ⚠️ 内部类名一律用 .pull-log-*（与 .log-* 区分开），避免 locator 严格模式撞 2 个匹配。 -->
+      <div class="data-block pull-log-block">
+        <div class="pull-log-head">
+          <h4 class="block-title">拉取记录</h4>
+          <div class="pull-log-actions">
+            <span class="pull-log-stat muted">共 {{ pullLogStats.total }} 次 · 成功 {{ pullLogStats.success }} · 失败 {{ pullLogStats.fail }}</span>
+            <span class="pull-log-dev-stat muted">PC {{ pullLogStats.pc }} 次 · 手机 {{ pullLogStats.mobile }} 次<span v-if="pullLogStats.unknown"> · 未记录 {{ pullLogStats.unknown }} 次</span></span>
+            <button v-if="pullLogs.length" class="ghost sm" @click="exportPullLogXlsx">导出记录</button>
+            <button v-if="pullLogs.length" class="ghost sm" @click="clearPullLogs">清空记录</button>
+          </div>
+        </div>
+        <p class="muted">
+          记录每次<strong>打开工作台</strong>时自动拉取云端的结果（只拉取、不上传），并标注是哪台设备（PC / 手机）打开的；若这次拉取触发了整库还原，刷新页面会并回同一条、不重复记（最多保留 200 条）。
+        </p>
+        <div v-if="!pullLogs.length" class="muted">暂无拉取记录</div>
+        <template v-else>
+          <div class="pull-log-list">
+            <div v-for="l in pagedPullLogs" :key="l.id" class="pull-log-row" :class="l.ok ? 'ok' : 'fail'">
+              <span class="pull-log-time">{{ fmtLogTime(l.at) }}</span>
+              <span class="pull-log-device" :title="'本次拉取由：' + deviceLabelOf(l)">{{ deviceLabelOf(l) }}</span>
+              <span class="pull-log-trigger">{{ l.triggerLabel }}</span>
+              <span class="pull-log-result">{{ l.ok ? '成功' : '失败' }}</span>
+              <span class="pull-log-info" :title="l.ok ? l.result : l.error">{{ l.ok ? l.result : l.error }}</span>
+            </div>
+          </div>
+          <div class="note-pager pull-log-pager">
+            <span class="muted pager-info pull-pager-info">第 {{ pullLogPage }} / {{ pullLogTotalPages }} 页 · 共 {{ pullLogs.length }} 条</span>
+            <div class="pager-controls">
+              <button class="ghost sm" :disabled="pullLogPage <= 1" @click="pullLogPage--">上一页</button>
+              <button class="ghost sm" :disabled="pullLogPage >= pullLogTotalPages" @click="pullLogPage++">下一页</button>
+              <span class="pager-sep"></span>
+              <span class="muted">每页</span>
+              <span class="pageSize-wrap">
+                <button class="ghost sm pageSize-trigger" :class="{ active: pullLogPageSizeOpen }" @click.stop="pullLogPageSizeOpen = !pullLogPageSizeOpen">{{ pullLogPageSize }} 条 ▴</button>
+                <div v-if="pullLogPageSizeOpen" class="pageSize-pop">
+                  <button v-for="s in [6, 20, 50, 100]" :key="s" class="ghost sm" :class="{ active: pullLogPageSize === s }" @click.stop="setPullLogPageSize(s)">{{ s }} 条</button>
+                </div>
+              </span>
+            </div>
+            <div v-if="pullLogPageSizeOpen" class="pop-backdrop" @click="pullLogPageSizeOpen = false"></div>
           </div>
         </template>
       </div>
@@ -1869,11 +1973,16 @@ async function clearAll() {
   background: rgba(239, 68, 68, 0.04);
 }
 
-/* ===== 同步记录（对齐 DocOutput.vue「执行记录」的排版）===== */
-.sync-log-block {
+/* ===== 同步记录 / 拉取记录（对齐 DocOutput.vue「执行记录」的排版）=====
+   第 41 轮：两块分家。DOM 里保持两套独立类名（.log-* 与 .pull-log-*），否则
+   locator('.log-stat') / locator('.log-row') 一次匹配到 2 个元素 ⇒ Playwright 严格模式报错；
+   CSS 则用**分组选择器**共享同一套视觉值 —— 以后改样式记得两组都列上。 */
+.sync-log-block,
+.pull-log-block {
   min-width: 0;
 }
-.log-head {
+.log-head,
+.pull-log-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1881,29 +1990,35 @@ async function clearAll() {
   flex-wrap: wrap;
   margin-bottom: 6px;
 }
-.log-head .block-title {
+.log-head .block-title,
+.pull-log-head .block-title {
   margin: 0;
 }
-.log-actions {
+.log-actions,
+.pull-log-actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.log-stat {
+.log-stat,
+.pull-log-stat {
   font-size: 12px;
 }
 /* 设备次数拆分（第 40 轮）。⚠️ 类名与 .log-stat 分开：否则 locator('.log-stat') 会撞严格模式 */
-.log-dev-stat {
+.log-dev-stat,
+.pull-log-dev-stat {
   font-size: 12px;
 }
-.log-list {
+.log-list,
+.pull-log-list {
   margin-top: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
 }
-.log-row {
+.log-row,
+.pull-log-row {
   display: grid;
   /* 第 40 轮加第 2 列「设备」（PC / 手机）：时间 | 设备 | 触发方式 | 结果 | 说明 */
   grid-template-columns: 96px 56px 84px 44px minmax(0, 1fr);
@@ -1914,21 +2029,26 @@ async function clearAll() {
   border-left: 3px solid transparent;
   background: var(--panel);
 }
-.log-row + .log-row {
+.log-row + .log-row,
+.pull-log-row + .pull-log-row {
   border-top: 1px solid var(--border);
 }
-.log-row.ok {
+.log-row.ok,
+.pull-log-row.ok {
   border-left-color: var(--success);
 }
-.log-row.fail {
+.log-row.fail,
+.pull-log-row.fail {
   border-left-color: var(--danger);
 }
-.log-time {
+.log-time,
+.pull-log-time {
   color: var(--muted);
   white-space: nowrap;
 }
 /* 第 40 轮：设备列（PC / 手机）做成小胶囊，窄屏也不会被挤断 */
-.log-device {
+.log-device,
+.pull-log-device {
   justify-self: start;
   font-size: 11px;
   line-height: 1;
@@ -1938,27 +2058,33 @@ async function clearAll() {
   color: var(--muted);
   white-space: nowrap;
 }
-.log-trigger {
+.log-trigger,
+.pull-log-trigger {
   color: var(--text);
   white-space: nowrap;
 }
-.log-result {
+.log-result,
+.pull-log-result {
   font-weight: 600;
 }
-.log-row.ok .log-result {
+.log-row.ok .log-result,
+.pull-log-row.ok .pull-log-result {
   color: var(--success);
 }
-.log-row.fail .log-result {
+.log-row.fail .log-result,
+.pull-log-row.fail .pull-log-result {
   color: var(--danger);
 }
-.log-info {
+.log-info,
+.pull-log-info {
   min-width: 0;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.log-row.fail .log-info {
+.log-row.fail .log-info,
+.pull-log-row.fail .pull-log-info {
   color: var(--danger);
 }
 /* 翻页栏：与「文档输出 / 笔记库」的分页样式保持一致 */
@@ -2019,11 +2145,13 @@ async function clearAll() {
 }
 @media (max-width: 720px) {
   /* 手机端：时间 + 设备 + 触发方式 + 结果 占一行，说明换行到第二行整行铺开，避免挤成 1 个字宽 */
-  .log-row {
+  .log-row,
+  .pull-log-row {
     grid-template-columns: 82px auto 1fr auto;
     row-gap: 2px;
   }
-  .log-info {
+  .log-info,
+  .pull-log-info {
     grid-column: 1 / -1;
     white-space: normal;
     overflow: visible;

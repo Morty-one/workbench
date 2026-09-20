@@ -6,7 +6,7 @@
 import { db } from '../db'
 import { encryptData, decryptData } from '../crypto'
 import { createGitHubBackend } from './GitHubBackend'
-import { addSyncLog } from './synclog'
+import { addSyncLog, markBootMergePending } from './synclog'
 
 // ---- 自动同步方式开关（2026-09-20 定案，当晚二次修订）----------------------------
 //   autoPush:false → 本地改动后不再防抖（3 秒）自动推送；手动「立即同步」与每日定时同步不受影响
@@ -31,6 +31,11 @@ import { addSyncLog } from './synclog'
 //    本端改完既没点手动、又错过 17:30（或那时没开机）⇒ 改动只在本地，云端不更新。
 //    实现位置：syncOnce() 里「3.5) boot 禁推」判定，插在 push 之前 ⇒ 全模块仅有的两处 PUT
 //    （主推送 + 409 重试）在 boot 下都够不到，**无需另外去堵 409 分支**。
+// ⚠️ 第 41 轮（2026-09-20 深夜，用户定案）：记录分家 + 修掉 boot「双记」。
+//    ① 记录分家：boot 记到「拉取记录」（wb_synclog_boot_v1），test/manual/scheduled/auto 记到
+//       「同步记录」（wb_synclog_v1）；各 200 条、各自导出/清空/分页 —— 见 synclog.js 顶部注释。
+//    ② 双记：attemptBoot() 在 reload 前调 markBootMergePending()，刷新后那趟 boot 的 addSyncLog
+//       命中合并分支 ⇒ 不新增第二条，并把结果并回上一条（「已从云端还原并刷新页面 ✓」）。
 export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: true, bootPush: false }
 
 const SYNC_TABLES = ['tasks', 'folders', 'notes', 'shortcuts', 'duty', 'settings', 'projects']
@@ -381,9 +386,12 @@ async function attemptBoot() {
   pulledInSession = true
   if (r && r.restored) {
     // 整库已换血：刷新页面让所有视图重新加载
-    // ⚠️ 刷新后 boot 会再跑一趟。那一趟由两道判定兜住：
+    // ⚠️ 刷新后 boot 会再跑一趟。那一趟由三道判定兜住：
     //    ① 第 39 轮「无需推送」判定（远端 == 本端已确认版本、且还原已把 dirtyAt 对齐）；
-    //    ② 第 40 轮「boot 禁推」判定（打开时一律不 PUT）—— 现在这层是主要保险。
+    //    ② 第 40 轮「boot 禁推」判定（打开时一律不 PUT）—— 现在这层是主要保险；
+    //    ③ 第 41 轮「记录合并」——刷新后那趟 boot **不再新增第二条记录**，而是并回这一条
+    //       （markBootMergePending → addSyncLog 命中合并分支，标注「已从云端还原并刷新页面」）。
+    markBootMergePending()
     setTimeout(() => location.reload(), 150)
   }
 }
