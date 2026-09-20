@@ -14,7 +14,9 @@ import { addSyncLog } from './synclog'
 //                    要「PC 端推完，手机一打开就是最新」，故重新打开本项。
 // ⚠️ 代码路径完整保留，**改行为只改这里两个布尔值即可**（不要删下面的逻辑分支）。
 // ⚠️ bootPull 的时序很关键：App.vue 里 bootCloudSync() 先于 seedIfEmpty() 执行，
-//    所以新设备启动时 dirtyAt 仍为 0 ⇒ localAhead 不成立 ⇒ 一定会采用远端，不会被种子数据反向覆盖。
+//    所以「配置已存在」的设备启动时 dirtyAt 仍为 0 ⇒ localAhead 不成立 ⇒ 一定采用远端。
+//    「配置尚不存在」的新容器（先 seed、后手填配置）由 syncOnce() 里第 38 轮新增的
+//    `firstSync = syncedAt <= 0` 守卫兜住 —— 首次同步一律以云端为准。
 export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: true }
 
 const SYNC_TABLES = ['tasks', 'folders', 'notes', 'shortcuts', 'duty', 'settings', 'projects']
@@ -169,9 +171,20 @@ async function syncOnce(reason, tablesArg) {
   // 保护性判定（2026-09 新增）：本地已有真实改动（dirtyAt > 0）且严格晚于远端快照
   // ⇒ 远端是旧快照，绝不能拿它覆盖本地。否则当本端「已确认时间戳」缺失/为 0 时，
   // 下面 LWW 判定里的 `!havePulledBeforeCheck()` 分支会在启动瞬间静默吃掉本地新数据。
-  // 新设备不受影响：App.vue 中 bootCloudSync() 先于 seedIfEmpty() 执行，此刻 dirtyAt 仍为 0。
+  //
+  // ⚠️ 2026-09-20 晚（第 38 轮）新增前提 `syncedAt > 0`：
+  //    「本端从未确认过任何一次同步」时，不许主张本地更新。原因：空容器 / 新设备走完
+  //    seedIfEmpty() 之后 dirtyAt≈now，会被判成「本地更新」，于是把**种子数据**推上云端，
+  //    覆盖掉真数据（CLOUD-SYNC.md §0.1、§0.2 记的真实事故风险）。
+  //    ⇒ 规则收敛成一句话：**每台设备的第一次同步一律以云端为准**，从第二次起才按时间戳比较。
+  //    代价（如实记录，勿当 bug）：从未同步成功过、却真持有更新数据的设备，首次同步会采用远端；
+  //    已同步过的设备（syncedAt > 0）行为完全不变（回归见 test_bootpull_on 场景 B）。
   const dirtyAt = getDirtyAt()
-  const localAhead = !!remoteSnap && dirtyAt > 0 && localSnap.updatedAt > remoteSnap.updatedAt
+  const firstSync = syncedAt <= 0
+  const localAhead = !!remoteSnap && !firstSync && dirtyAt > 0 && localSnap.updatedAt > remoteSnap.updatedAt
+  if (firstSync && remoteSnap) {
+    console.warn('[cloudsync] 本端从未确认过同步（syncedAt=0）⇒ 首次同步一律以云端为准，不主张本地更新')
+  }
   if (localAhead) {
     console.warn('[cloudsync] 云端快照较旧（远端 ' + new Date(remoteSnap.updatedAt).toLocaleString() +
       ' < 本地 ' + new Date(localSnap.updatedAt).toLocaleString() + '），跳过还原，改为推送本地')
