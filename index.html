@@ -11,6 +11,49 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="工作台" />
     <title>个人轻量工作台</title>
+    <!-- 启动兜底（第 39 轮，2026-09-20）：
+         场景：浏览器 / Service Worker 里留着**旧 index.html**，它引用的 assets/index-<旧hash>.js
+               已被新构建删除 ⇒ 模块 404 ⇒ #app 永远空白（白屏，即 CLOUD-SYNC.md §0.2 那一类）。
+         做法：① 监听 script 资源加载失败；② 8 秒后应用仍未挂载（main.js 会置 window.__wbBooted）
+               ⇒ 清空全部 Cache Storage 并刷新一次，让浏览器重新取新的 index.html + assets。
+         防死循环：sessionStorage 记为 1 分钟内只兜底一次（真出不来时不会无限刷新）。
+         注意：必须是普通 script（非 type=module），否则它自己也会因为同一个 404 而不执行。 -->
+    <script>
+      (function () {
+        var KEY = 'wb_boot_fallback_at'
+        function recover(why) {
+          // 离线时不清缓存：清了连旧资源都拿不到，只会从白屏变成彻底打不开；等回到线上再自愈。
+          if (navigator.onLine === false) return
+          try {
+            var last = Number(sessionStorage.getItem(KEY) || 0)
+            if (last && Date.now() - last < 60000) return
+            sessionStorage.setItem(KEY, String(Date.now()))
+          } catch (_) {
+            return
+          }
+          try { console.warn('[boot-fallback] ' + why + ' -> clear caches & reload') } catch (_) {}
+          var go = function () { try { location.reload() } catch (_) {} }
+          try {
+            if (window.caches && caches.keys) {
+              caches.keys().then(function (ks) {
+                return Promise.all(ks.map(function (k) { return caches.delete(k) }))
+              }).then(go, go)
+            } else { go() }
+          } catch (_) { go() }
+        }
+        window.__wbBootRecover = recover
+        // ① 主脚本 404（旧 index.html 指向已删除的 assets）
+        window.addEventListener('error', function (e) {
+          var t = e && e.target
+          if (t && t.tagName === 'SCRIPT' && t.src) recover('script load failed: ' + t.src)
+        }, true)
+        // ② 兜底计时：8 秒仍未挂载 ⇒ 视为白屏
+        window.setTimeout(function () {
+          var app = document.getElementById('app')
+          if (!window.__wbBooted && app && !app.firstChild) recover('app not mounted within 8s')
+        }, 8000)
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

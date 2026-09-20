@@ -17,6 +17,13 @@ import { addSyncLog } from './synclog'
 //    所以「配置已存在」的设备启动时 dirtyAt 仍为 0 ⇒ localAhead 不成立 ⇒ 一定采用远端。
 //    「配置尚不存在」的新容器（先 seed、后手填配置）由 syncOnce() 里第 38 轮新增的
 //    `firstSync = syncedAt <= 0` 守卫兜住 —— 首次同步一律以云端为准。
+// ⚠️ 第 39 轮（2026-09-20 晚）：boot 拉取还原后会 location.reload()，刷新后 boot 会**再跑一遍**。
+//    那一趟原本会走 push 分支，把刚拉下来的整库（约 1.2MB）原样回推，并把云端快照 updatedAt
+//    改写成还原前的旧 dirtyAt（实测回退 5 天）。现已由两处改动治掉：
+//      ① restoreSnapshot() 还原后把 dirtyAt 对齐到快照时间戳 ⇒ 第二趟不再误判「本端较新」；
+//      ② syncOnce() 新增「无需推送」判定：远端 == 本端已确认版本且本端无未推送改动时，直接跳过 push。
+//    ⇒ 打开工作台只拉不推；本端确有未推送改动（localAhead）时仍然照旧推送，这条不能丢
+//      （autoPush 关闭期间，它是本机改动自动上云的唯一通道）。
 export const AUTO_SYNC_FEATURES = { autoPush: false, bootPull: true }
 
 const SYNC_TABLES = ['tasks', 'folders', 'notes', 'shortcuts', 'duty', 'settings', 'projects']
@@ -129,6 +136,12 @@ export async function restoreSnapshot(snap, tablesArg) {
       }
     })
     for (const k of Object.keys(localKeep)) await db.settings.put(localKeep[k])
+    // ⚠️ 第 39 轮：整库还原后，本端内容已经 == 云端快照，之前那个「本地脏时间戳」随还原失效。
+    //    必须把它对齐到快照时间戳，否则下一轮同步仍会认为「本端有更新的改动」（localAhead 成立），
+    //    于是把刚拉下来的整库原样回推一次（约 1.2MB），并把云端快照的 updatedAt 改写成这个旧值。
+    //    实测（第 39 轮基线，场景 A）：云端时间戳被从 9/20 20:26 写成 9/15 20:27，回退 5 天。
+    const restoredAt = Number(snap && snap.updatedAt) || 0
+    if (restoredAt > 0) { try { localStorage.setItem(LS_DIRTY_AT, String(restoredAt)) } catch (_) { /* ignore */ } }
     // 通知 autosync 把还原后的数据落一份到本地目录（PC）
     try { window.dispatchEvent(new CustomEvent('wb:cloud-restored')) } catch (_) { /* ignore */ }
   } finally {
@@ -141,6 +154,7 @@ export async function restoreSnapshot(snap, tablesArg) {
 //   unseen = 远端 updatedAt > 本端已确认时间戳（说明远端有本端没见过的版本）
 //   localAhead = 本地有真实改动且严格晚于远端（远端是旧快照）→ 禁止还原，直接推送本地
 //   满足 unseen 且非 localAhead 且（本次会话没拉取过 或 远端比本端最后修改更新）→ 用远端还原本地
+//   远端已是本端确认版本（!unseen）且本端无未推送改动（!localAhead）→ 无事可做，**不推送**（第 39 轮）
 //   否则 → 把本端快照加密推送（带 sha，409 自动重试一次）
 async function syncOnce(reason, tablesArg) {
   const be = backend()
@@ -199,7 +213,21 @@ async function syncOnce(reason, tablesArg) {
     emit()
     return { restored: true }
   }
-  // 3) push（仅推送本次勾选的表）
+  // 3) 无需推送判定（第 39 轮新增，治「白推整库 + 云端时间戳回退」）
+  //    远端已经就是本端确认过的那一版（!unseen），且本端没有未推送的新改动（!localAhead）
+  //    ⇒ 没有任何东西需要写回云端。此时若照旧推送，就只是把云端内容原样再 PUT 一次：
+  //      ① boot 整库还原 → reload → 第二轮会白推整库（约 1.2MB）；
+  //      ② 每次打开工作台（哪怕一个字没改）也会白推一次；
+  //      ③ 更糟的是推送载荷的 updatedAt 取的是本端 dirtyAt，会把云端快照时间戳改写成旧值。
+  //    保留必须推送的两条路径：远端为 null（云端还没有快照，要 seed）／localAhead（本端有更新的真实改动）。
+  if (remoteSnap && !unseen && !localAhead) {
+    state.lastSyncAt = Date.now()
+    state.lastResult = '已是最新（云端与本端一致，无需推送）'
+    state.lastError = ''
+    emit()
+    return { restored: false, skipped: true }
+  }
+  // 4) push（仅推送本次勾选的表）
   const enc = await encryptData(localSnap, cfg.pw)
   const b64 = utf8ToB64(JSON.stringify(enc))
   const msg = 'workbench sync · ' + localSnap.device + ' · ' + reason + ' · ' + new Date().toISOString()
@@ -328,6 +356,8 @@ async function attemptBoot() {
   pulledInSession = true
   if (r && r.restored) {
     // 整库已换血：刷新页面让所有视图重新加载
+    // ⚠️ 刷新后 boot 会再跑一趟；那一趟由第 39 轮的「无需推送」判定兜住（此时远端 == 本端已确认版本、
+    //    且还原已把 dirtyAt 对齐 ⇒ 不再回推整库，也不会把云端快照时间戳改写回旧值）。
     setTimeout(() => location.reload(), 150)
   }
 }
