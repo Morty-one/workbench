@@ -10,6 +10,8 @@ import { ensureDefaultProject } from '../seed'
 import { resolveWeekProjectForDate } from '../autoProjects'
 import { shiftKeyOf, weekdayOf, isWeekend, isWorkingDay, isSingleShiftDay, SHIFT_KEYS } from '../shift'
 import { openExternal, localPathOf } from '../utils/localOpen.js'
+// 第 43 轮：链接级 / 全局默认浏览器
+import { browserForLink, loadBrowserPrefs, getBrowserList } from '../utils/browserPref.js'
 import ProjectStack from './ProjectStack.vue'
 import ProjectManager from './ProjectManager.vue'
 import TaskFormModal from '../components/TaskFormModal.vue'
@@ -81,10 +83,16 @@ function closeQuickAdd() {
   showQuickAdd.value = false
 }
 // 链接落库前的统一归一（第 42 轮）：本地路径先剥壳，避免存成 `https://"C:\…"` 后点不开
+// 第 43 轮：保留 browser（链接级浏览器 id）；空值删掉，别在库里堆 browser:'' 的脏字段
 function normLinks(list) {
   return (list || [])
     .filter((l) => (l && (l.url || '').trim()))
-    .map((l) => ({ url: localPathOf(l.url) || l.url.trim(), label: (l.label || '打开').trim() || '打开' }))
+    .map((l) => {
+      const out = { url: localPathOf(l.url) || l.url.trim(), label: (l.label || '打开').trim() || '打开' }
+      const b = (l.browser == null ? '' : String(l.browser)).trim()
+      if (b) out.browser = b
+      return out
+    })
 }
 async function onQuickSubmit(data) {
   const title = (data.title || '').trim()
@@ -248,13 +256,13 @@ const QUAD_SHORT = {
   'urgent-notimportant': '不重要紧急',
   'noturgent-notimportant': '不重要不紧急'
 }
-/* 链接统一规范化成 { url, label }，与任务管理口径一致 */
+/* 链接统一规范化成 { url, label, browser }，与任务管理口径一致 */
 function normLinkItem(x) {
   if (typeof x === 'string') return { url: x, label: '打开' }
   if (x && typeof x === 'object') {
     const url = (x.url || '').trim()
     const label = (x.label || '打开').trim() || '打开'
-    return { url, label }
+    return { url, label, browser: (x.browser == null ? '' : String(x.browser)).trim() }
   }
   return { url: '', label: '打开' }
 }
@@ -874,21 +882,34 @@ function iconOf(s) {
   return { type: 'text', value: s.name ? s.name.slice(0, 1) : '·' }
 }
 function openShortcut(s) {
-  if (s.url) openExternal(s.url)
+  if (s.url) openExternal(s.url, browserForLink(s))
 }
-function handleLinkClick(url, ev) {
+// link 既可以是 { url, label, browser } 对象，也可以是裸字符串（老调用点）
+function handleLinkClick(link, ev) {
   if (ev) ev.preventDefault()
-  openExternal(url)
+  const l = (link && typeof link === 'object') ? link : { url: link }
+  openExternal(l.url, browserForLink(l))
 }
 
 /* 快捷入口可配置：增删改 */
 const editingShortcuts = ref(false)
 const editingShortcutId = ref(null)
-const newShortcut = reactive({ name: '', url: '', icon: '' })
+const newShortcut = reactive({ name: '', url: '', icon: '', browser: '' })
+// 「用哪个浏览器打开」下拉可选（第 43 轮）：空 id = 跟随设置中心里的全局默认
+const browserOptions = ref([])
+async function refreshBrowserOptions() {
+  try {
+    await loadBrowserPrefs()
+    browserOptions.value = getBrowserList()
+  } catch (e) {
+    browserOptions.value = []
+  }
+}
 function resetShortcutForm() {
   newShortcut.name = ''
   newShortcut.url = ''
   newShortcut.icon = ''
+  newShortcut.browser = ''
   editingShortcutId.value = null
 }
 function editShortcut(s) {
@@ -897,6 +918,7 @@ function editShortcut(s) {
   newShortcut.name = s.name || ''
   newShortcut.url = s.url || ''
   newShortcut.icon = s.icon || ''
+  newShortcut.browser = s.browser || ''
 }
 async function saveShortcut() {
   const name = newShortcut.name.trim()
@@ -904,10 +926,11 @@ async function saveShortcut() {
   const url = localPathOf(newShortcut.url) || newShortcut.url.trim()
   const icon = newShortcut.icon.trim()
   if (!name || !url) return
+  const patch = { name, url, icon, browser: (newShortcut.browser || '').trim() }
   if (editingShortcutId.value != null) {
-    await db.shortcuts.update(editingShortcutId.value, { name, url, icon })
+    await db.shortcuts.update(editingShortcutId.value, patch)
   } else {
-    await db.shortcuts.add({ name, url, icon })
+    await db.shortcuts.add(patch)
   }
   resetShortcutForm()
   await loadAll()
@@ -920,6 +943,8 @@ async function removeShortcut(id) {
 function toggleEditShortcuts() {
   editingShortcuts.value = !editingShortcuts.value
   if (!editingShortcuts.value) resetShortcutForm()
+  // 进入配置态时刷新浏览器下拉（可能刚在设置中心改过清单）
+  else refreshBrowserOptions()
 }
 
 async function onProjectsChanged() {
@@ -1042,7 +1067,7 @@ async function onProjectsChanged() {
                   </div>
                   <!-- 主任务链接：仅无子任务时显示（含子任务时链接在子任务上） -->
                   <div v-if="allLinks(t).length && !hasSubs(t)" class="todo-links">
-                    <a v-for="(u, ui) in allLinks(t)" :key="ui" class="ghost sm todo-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u.url, $event)">
+                    <a v-for="(u, ui) in allLinks(t)" :key="ui" class="ghost sm todo-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u, $event)">
                       <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
                       {{ u.label }}
                     </a>
@@ -1058,7 +1083,7 @@ async function onProjectsChanged() {
                     <span v-if="subOverdue(s, t)" class="badge-over sm">逾期</span>
                     <span class="sub-actions">
                       <span v-if="allLinksOfSub(s).length" class="sub-link-group">
-                        <a v-for="(u, ui) in allLinksOfSub(s)" :key="ui" class="sub-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u.url, $event)">{{ u.label }}↗</a>
+                        <a v-for="(u, ui) in allLinksOfSub(s)" :key="ui" class="sub-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u, $event)">{{ u.label }}↗</a>
                       </span>
                       <button class="ghost sm" @click="snoozeTask(t.id, 60)" title="推迟此任务">推迟</button>
                     </span>
@@ -1097,6 +1122,11 @@ async function onProjectsChanged() {
         <VoiceInput v-model="newShortcut.name" />
         <input v-model="newShortcut.icon" class="sc-input" style="max-width: 140px" placeholder="图标（emoji / mail / board）" @keyup.enter="saveShortcut" />
         <input v-model="newShortcut.url" class="sc-input" placeholder="链接 URL 或本地路径（D:\xxx\a.exe）" @keyup.enter="saveShortcut" />
+        <!-- 第 43 轮：单条快捷入口也能指定浏览器（默认 = 跟随设置中心里的全局默认） -->
+        <select v-model="newShortcut.browser" class="sc-select" title="这条链接用哪个浏览器打开（默认 = 跟随设置中心「浏览器与打开方式」里的全局默认）">
+          <option value="">默认浏览器</option>
+          <option v-for="b in browserOptions" :key="b.id" :value="b.id">{{ b.name || b.exe }}</option>
+        </select>
         <button class="primary sm" @click="saveShortcut">{{ editingShortcutId != null ? '保存修改' : '+ 添加' }}</button>
         <button v-if="editingShortcutId != null" class="ghost sm" @click="resetShortcutForm">取消</button>
       </div>
@@ -1797,6 +1827,23 @@ async function onProjectsChanged() {
   font-size: 13px;
 }
 .sc-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+/* 第 43 轮：快捷入口的「用哪个浏览器打开」下拉（不进 flex:1，固定宽度，别把 URL 输入挤没） */
+.sc-select {
+  flex: none;
+  width: 116px;
+  padding: 8px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.sc-select:focus {
   outline: none;
   border-color: var(--primary);
 }

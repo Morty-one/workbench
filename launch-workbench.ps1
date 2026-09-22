@@ -2,7 +2,7 @@
 
 $ErrorActionPreference = 'Stop'
 $ProjectDir = $PSScriptRoot
-$NodeExe    = 'C:\Users\morty\.workbuddy\binaries\node\versions\22.22.2\node.exe'
+$NodeExe    = 'C:\Users\morty\.workbuddy\binaries\node\versions\22.22.2-3\node.exe'
 # Point VBS to the 4173 preview so it opens the exact same build as the shared preview (no 5173 dev drift).
 $Port        = 4173
 $BridgePort  = 4567
@@ -248,33 +248,53 @@ try {
 
     # 6) Open the workbench as an app-style window (no address bar / no tabs),
     #    then dismiss the splash.
-    #    Preference: Chrome --app > Edge --app > system default browser.
+    #    Preference: Edge --app > Chrome --app > system default browser.
+    #    Edge routes Web Speech to Microsoft's service (works in China); Chrome
+    #    routes it to Google (blocked in China), so Edge is preferred for voice.
     #    Chrome's --start-maximized is unreliable in --app mode (well-known issue),
     #    so we also force-maximize via Win32 ShowWindow right after launch.
     $openUrl = $Url + '?_=' + [DateTime]::Now.Ticks
+    # Window mode (round 43): read window-pref.json, which the web UI writes through the local
+    # bridge (Settings -> browser & open-with). The web page cannot tell us anything here --
+    # it does not exist yet -- so the choice has to be persisted to a file.
+    #   maximized (default) = pass a fixed size + --start-maximized, then force-maximize via Win32
+    #   remember            = pass NO size/maximize flag at all, so the browser restores its own
+    #                         last window placement for this URL (Edge/Chrome remember it per app)
+    $windowMode = 'maximized'
+    $prefFile = Join-Path $ProjectDir 'window-pref.json'
+    if (Test-Path $prefFile) {
+        try {
+            $pref = Get-Content -Path $prefFile -Raw | ConvertFrom-Json
+            if ($pref -and ($pref.mode -eq 'remember')) { $windowMode = 'remember' }
+        } catch {}
+    }
+    $edgeCandidates = @(
+        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe')
+    )
     $chromeCandidates = @(
         (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
         (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'),
         (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')
     )
-    $edgeCandidates = @(
-        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe')
-    )
-    $appArgs = @('--app=' + $openUrl, '--window-size=1440,900', '--start-maximized')
-    $chromeProc = $null
+    if ($windowMode -eq 'remember') {
+        $appArgs = @('--app=' + $openUrl)
+    } else {
+        $appArgs = @('--app=' + $openUrl, '--window-size=1440,900', '--start-maximized')
+    }
+    $edgeProc = $null
     $opened = $false
-    foreach ($exe in $chromeCandidates) {
+    foreach ($exe in $edgeCandidates) {
         if (Test-Path $exe) {
-            $chromeProc = Start-Process -FilePath $exe -ArgumentList $appArgs -PassThru
+            $edgeProc = Start-Process -FilePath $exe -ArgumentList $appArgs -PassThru
             $opened = $true
             break
         }
     }
     if (-not $opened) {
-        foreach ($exe in $edgeCandidates) {
+        foreach ($exe in $chromeCandidates) {
             if (Test-Path $exe) {
-                $chromeProc = Start-Process -FilePath $exe -ArgumentList $appArgs -PassThru
+                $edgeProc = Start-Process -FilePath $exe -ArgumentList $appArgs -PassThru
                 $opened = $true
                 break
             }
@@ -372,11 +392,13 @@ public class WinMax {
     }
 }
 '@
-        if ($chromeProc -and $chromeProc.Id) {
+        if ($edgeProc -and $edgeProc.Id -and ($windowMode -ne 'remember')) {
+            # 'remember' mode must NOT be force-maximized -- the whole point is to let the
+            # browser restore the size/position the user last used for this app window.
             # Expected page title (built from char codes to keep this file pure ASCII).
             $titleCodes = @(0x4E2A, 0x4EBA, 0x8F7B, 0x91CF, 0x5DE5, 0x4F5C, 0x53F0)
             $expectedTitle = -join ($titleCodes | ForEach-Object { [char]$_ })
-            [WinMax]::MaximizeSmart([uint32]$chromeProc.Id, $expectedTitle, 'chrome;msedge', 25, 200) | Out-Null
+            [WinMax]::MaximizeSmart([uint32]$edgeProc.Id, $expectedTitle, 'chrome;msedge', 25, 200) | Out-Null
         }
     }
 }

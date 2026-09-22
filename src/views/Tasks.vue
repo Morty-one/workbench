@@ -4,6 +4,8 @@ import { db } from '../db'
 import * as XLSX from 'xlsx-js-style'
 import { marked } from 'marked'
 import { openExternal, localPathOf } from '../utils/localOpen.js'
+// 第 43 轮：解析「这条链接该用哪个浏览器」（链接级指定 → 全局默认 → 系统默认）
+import { browserForLink } from '../utils/browserPref.js'
 import { docState, requestDocOutput } from '../docoutput.js'
 import { shiftKeyOf } from '../shift'
 import TaskFormModal from '../components/TaskFormModal.vue'
@@ -870,10 +872,16 @@ function edit(t) {
   showForm.value = true
 }
 // 链接落库前的统一归一（第 42 轮）：本地路径先剥壳，避免存成 `https://"C:\…"` 后点不开
+// 第 43 轮：保留 browser（链接级浏览器 id）；空值删掉，不在库里堆 browser:'' 的脏字段
 function normLinks(list) {
   return (list || [])
     .filter((l) => (l && (l.url || '').trim()))
-    .map((l) => ({ url: localPathOf(l.url) || l.url.trim(), label: (l.label || '打开').trim() || '打开' }))
+    .map((l) => {
+      const out = { url: localPathOf(l.url) || l.url.trim(), label: (l.label || '打开').trim() || '打开' }
+      const b = (l.browser == null ? '' : String(l.browser)).trim()
+      if (b) out.browser = b
+      return out
+    })
 }
 async function onFormSubmit(data) {
   if (!data.title.trim()) return
@@ -1068,15 +1076,17 @@ async function makePreset(t) {
   await db.settings.put({ key: 'periodicDutyTasks', value: rules })
   alert('已设为自动化预设 ✓')
 }
-// 兼容 legacy 单链接字段 / 字符串链接，统一返回 { url, label } 数组
+// 兼容 legacy 单链接字段 / 字符串链接，统一返回 { url, label, browser } 数组
 function normLink(x) {
   if (typeof x === 'string') return { url: x, label: '打开' }
-  if (x && typeof x === 'object') return { url: x.url || '', label: x.label || '打开' }
+  if (x && typeof x === 'object') return { url: x.url || '', label: x.label || '打开', browser: x.browser || '' }
   return { url: '', label: '打开' }
 }
-function handleLinkClick(url, ev) {
+// link 既可以是 { url, label, browser } 对象，也可以是裸字符串（老调用点）
+function handleLinkClick(link, ev) {
   if (ev) ev.preventDefault()
-  openExternal(url)
+  const l = (link && typeof link === 'object') ? link : { url: link }
+  openExternal(l.url, browserForLink(l))
 }
 function allLinksOf(t) {
   let arr = []
@@ -1376,14 +1386,14 @@ onUnmounted(() => {
                   <div class="sub-meta">
                     <span v-if="s.dueTime" class="sub-time muted">完成 {{ s.dueTime }}</span>
                     <span v-if="allLinksOf(s).length" class="sub-link-group">
-                      <a v-for="(u, ui) in allLinksOf(s)" :key="ui" class="sub-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u.url, $event)">{{ u.label }} ↗</a>
+                      <a v-for="(u, ui) in allLinksOf(s)" :key="ui" class="sub-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u, $event)">{{ u.label }} ↗</a>
                     </span>
                   </div>
                 </li>
               </ul>
             </div>
             <div v-if="allLinksOf(item.task).length" class="task-links">
-              <a v-for="(u, ui) in allLinksOf(item.task)" :key="ui" class="task-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u.url, $event)">
+              <a v-for="(u, ui) in allLinksOf(item.task)" :key="ui" class="task-link" :href="u.url" target="_blank" rel="noopener" :title="u.url" @click.prevent.stop="handleLinkClick(u, $event)">
                 <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
                 {{ u.label }} ↗
               </a>

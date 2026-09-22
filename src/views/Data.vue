@@ -10,6 +10,11 @@ import { ensureDefaultProject } from '../seed'
 import { SHIFT_OPTIONS, WEEKDAY_LABELS, weekdayText } from '../shift'
 // 第 42 轮：链接保存前先剥壳，避免把本地路径存成 `https://"C:\…"`（详见 localOpen.js 文件头）
 import { localPathOf } from '../utils/localOpen.js'
+// 第 43 轮：浏览器与打开方式（浏览器清单 / 全局默认 / 窗口模式 / 检测本机浏览器）
+import {
+  loadBrowserPrefs, detectBrowsers, pickExePath,
+  getWindowMode, setWindowMode, FOLLOW_SYSTEM
+} from '../utils/browserPref.js'
 import * as XLSX_NS from 'xlsx-js-style'
 import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate'
 
@@ -305,6 +310,120 @@ const cloudScheduleOn = ref(true)
 const cloudScheduleTime = ref('17:30')
 const syncModules = SYNC_MODULES
 let unsubCloudState = null
+
+/* ---------- 浏览器与打开方式（第 43 轮） ----------
+ * 浏览器清单 / 全局默认：存 IndexedDB 设置表（browserList / defaultBrowserId），是**本机偏好**
+ * （exe 路径换电脑就失效），所以不指望它跨设备可用。
+ * 窗口模式：必须经本地桥落盘 window-pref.json —— 启动脚本 launch-workbench.ps1 在网页加载
+ * 之前就要决定给浏览器传哪些参数，网页那时还不存在 ⇒ 这条天然「下次重开工作台生效」。
+ * 链接级指定浏览器时存的是**浏览器 id**（不是路径），改了路径不用回头改每条链接。
+ */
+const browserList = ref([])
+const defaultBrowserId = ref(FOLLOW_SYSTEM)
+const linkTip = ref('')
+const linkTipErr = ref(false)
+const detectingBrowsers = ref(false)
+const windowMode = ref('maximized')
+const windowModeTip = ref('')
+const windowModeTipErr = ref(false)
+let linkTipTimer = null
+let windowTipTimer = null
+
+// 规则编辑器（预设任务）里的「用哪个浏览器」下拉：只列已经填了 exe 的条目
+const browserOptions = computed(() => browserList.value.filter((b) => String(b.exe || '').trim()))
+
+function setLinkTip(msg, isErr) {
+  linkTip.value = msg
+  linkTipErr.value = !!isErr
+  if (linkTipTimer) clearTimeout(linkTipTimer)
+  linkTipTimer = setTimeout(() => { if (linkTip.value === msg) linkTip.value = '' }, 7000)
+}
+function setWindowTip(msg, isErr) {
+  windowModeTip.value = msg
+  windowModeTipErr.value = !!isErr
+  if (windowTipTimer) clearTimeout(windowTipTimer)
+  windowTipTimer = setTimeout(() => { if (windowModeTip.value === msg) windowModeTip.value = '' }, 7000)
+}
+function newBrowserId() {
+  return 'br_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+}
+async function saveBrowsers() {
+  // toPlain：数组从库里读回来是响应式 Proxy，直接 put 会 DataCloneError（同 cloudModules 的坑）
+  await db.settings.put({ key: 'browserList', value: toPlain(browserList.value) })
+  await db.settings.put({ key: 'defaultBrowserId', value: defaultBrowserId.value || '' })
+  // 立刻刷新模块级缓存，省得用户以为「改完要重启才生效」
+  await loadBrowserPrefs(true)
+}
+function addBrowser() {
+  browserList.value.push({ id: newBrowserId(), name: '', exe: '' })
+  saveBrowsers().catch(() => {})
+  setLinkTip('已添加一行：填好名称，再用「浏览…」选一个 exe')
+}
+async function removeBrowser(b) {
+  const label = b.name || b.exe || '该条目'
+  browserList.value = browserList.value.filter((x) => x.id !== b.id)
+  if (defaultBrowserId.value === b.id) defaultBrowserId.value = ''
+  await saveBrowsers()
+  setLinkTip('已删除：' + label)
+}
+async function pickBrowserExe(b) {
+  try {
+    const r = await pickExePath()
+    if (r.cancelled) { setLinkTip('已取消选择'); return }
+    if (!r.ok) { setLinkTip('选择失败：' + (r.error || '未知错误'), true); return }
+    b.exe = r.path
+    if (!String(b.name || '').trim()) {
+      // 从 exe 文件名推一个默认名称（msedge.exe → msedge），用户想改随时改
+      const base = r.path.split('\\').pop().replace(/\.exe$/i, '')
+      b.name = base
+    }
+    await saveBrowsers()
+    setLinkTip('已填入：' + r.path)
+  } catch (e) {
+    setLinkTip('选择失败：' + ((e && e.message) || e) + '（本地桥没启动？）', true)
+  }
+}
+async function detectBrowserList() {
+  if (detectingBrowsers.value) return
+  detectingBrowsers.value = true
+  try {
+    const found = await detectBrowsers()
+    const have = new Set(browserList.value.map((b) => String(b.exe || '').toLowerCase()))
+    let added = 0
+    for (const b of found) {
+      const key = String(b.exe || '').toLowerCase()
+      if (!key || have.has(key)) continue
+      browserList.value.push({ id: newBrowserId(), name: b.name, exe: b.exe })
+      have.add(key)
+      added++
+    }
+    if (added) await saveBrowsers()
+    if (added) setLinkTip('已检测并添加 ' + added + ' 个本机浏览器')
+    else if (found.length) setLinkTip('检测到的浏览器都已在列表里了')
+    else setLinkTip('没扫到常见浏览器：可点「添加浏览器」后手动「浏览…」选 exe', true)
+  } catch (e) {
+    setLinkTip('检测失败：' + ((e && e.message) || e) + '（本地桥没启动？）', true)
+  } finally {
+    detectingBrowsers.value = false
+  }
+}
+async function loadWindowMode() {
+  try {
+    const d = await getWindowMode()
+    windowMode.value = (d && d.mode) || 'maximized'
+  } catch (e) {
+    windowMode.value = 'maximized' // 桥没起来就用默认值显示，不报错打扰用户
+  }
+}
+async function saveWindowMode() {
+  try {
+    const d = await setWindowMode(windowMode.value)
+    windowMode.value = (d && d.mode) || windowMode.value
+    setWindowTip('已保存：下次重新打开工作台生效', false)
+  } catch (e) {
+    setWindowTip('保存失败：' + ((e && e.message) || e) + '（本地桥没启动？）', true)
+  }
+}
 
 function applyCloudConfig() {
   configureCloud({
@@ -720,6 +839,19 @@ async function loadSettings() {
   const cst = await db.settings.get('cloudScheduleTime')
   if (cst && cst.value) cloudScheduleTime.value = cst.value
   applyCloudConfig()
+  // 浏览器与打开方式（第 43 轮）
+  const bl = await db.settings.get('browserList')
+  browserList.value = Array.isArray(bl && bl.value)
+    ? bl.value.map((b) => ({
+        id: String((b && b.id) || newBrowserId()),
+        name: String((b && b.name) || ''),
+        exe: String((b && b.exe) || '')
+      }))
+    : []
+  const dbid = await db.settings.get('defaultBrowserId')
+  defaultBrowserId.value = (dbid && typeof dbid.value === 'string') ? dbid.value : FOLLOW_SYSTEM
+  await loadBrowserPrefs(true) // 让 App.vue 那侧的模块级缓存与设置中心保持同一份
+  await loadWindowMode()
 }
 
 // 进入自动化 tab 时从库里重新拉取规则，确保与任务管理「设为预设」保持同步
@@ -1010,7 +1142,15 @@ async function addRule() {
       return Number.isFinite(n) ? Math.max(0, Math.min(23, Math.floor(n))) : 9
     })(),
     links: (newRuleLinks.value || [])
-      .map((u) => (typeof u === 'string' ? { url: normalizeUrl(u), label: '打开' } : { url: normalizeUrl(u && u.url), label: (u && u.label) || '打开' }))
+      .map((u) => {
+        const l = (typeof u === 'string')
+          ? { url: normalizeUrl(u), label: '打开' }
+          : { url: normalizeUrl(u && u.url), label: (u && u.label) || '打开' }
+        // 第 43 轮：带上链接级浏览器 id（空值不写，避免脏字段）
+        const b = (u && typeof u === 'object' && u.browser != null) ? String(u.browser).trim() : ''
+        if (b) l.browser = b
+        return l
+      })
       .filter((l) => l.url),
     subtasks: newRuleSubtasks.value
       .map((s) => ({
@@ -1019,7 +1159,14 @@ async function addRule() {
         dueTime: (s.dueTime || '').trim(),
         remindTime: (s.remindTime || '').trim(),
         links: (Array.isArray(s.links) ? s.links : [])
-          .map((u) => (typeof u === 'string' ? { url: normalizeUrl(u), label: '打开' } : { url: normalizeUrl(u && u.url), label: (u && u.label) || '打开' }))
+          .map((u) => {
+            const l = (typeof u === 'string')
+              ? { url: normalizeUrl(u), label: '打开' }
+              : { url: normalizeUrl(u && u.url), label: (u && u.label) || '打开' }
+            const b = (u && typeof u === 'object' && u.browser != null) ? String(u.browser).trim() : ''
+            if (b) l.browser = b
+            return l
+          })
           .filter((l) => l.url)
       }))
       .filter((s) => s.text)
@@ -1087,9 +1234,9 @@ function startEditRule(raw) {
   newRuleRemark.value = r.remark || ''
   newRuleGenHour.value = Number.isFinite(r.genHour) ? r.genHour : 9
   // 兼容旧规则的单链接 url/urlLabel，自动迁移为多链接
-  const legacyLink = r.url ? [{ url: r.url, label: r.urlLabel || '打开' }] : []
+  const legacyLink = r.url ? [{ url: r.url, label: r.urlLabel || '打开', browser: '' }] : []
   newRuleLinks.value = Array.isArray(r.links)
-    ? r.links.map((u) => (typeof u === 'string' ? { url: u, label: '打开' } : { url: (u && u.url) || '', label: (u && u.label) || '打开' })).filter((l) => l.url)
+    ? r.links.map((u) => (typeof u === 'string' ? { url: u, label: '打开', browser: '' } : { url: (u && u.url) || '', label: (u && u.label) || '打开', browser: (u && u.browser) || '' })).filter((l) => l.url)
     : legacyLink
   newRuleSubtasks.value = (r.subtasks || []).map((s) => ({
     id: s.id || String(Date.now()) + Math.random().toString(36).slice(2),
@@ -1097,9 +1244,9 @@ function startEditRule(raw) {
     dueTime: s.dueTime || '',
     remindTime: s.remindTime || '',
     links: Array.isArray(s.links)
-      ? s.links.map((u) => (typeof u === 'string' ? { url: u, label: '打开' } : { url: (u && u.url) || '', label: (u && u.label) || '打开' })).filter((l) => l.url)
+      ? s.links.map((u) => (typeof u === 'string' ? { url: u, label: '打开', browser: '' } : { url: (u && u.url) || '', label: (u && u.label) || '打开', browser: (u && u.browser) || '' })).filter((l) => l.url)
       : s.url
-        ? [{ url: s.url, label: '打开' }]
+        ? [{ url: s.url, label: '打开', browser: '' }]
         : []
   }))
 }
@@ -1367,6 +1514,58 @@ async function clearAll() {
           <br />当前目录：<code>{{ dirName }}</code>
           <br />（网页无法自动弹出文件管理器，复制目录名后可在资源管理器中粘贴定位。）
         </p>
+      </div>
+
+      <!-- 浏览器与打开方式（第 43 轮）：本机偏好。
+           浏览器清单/全局默认存 IndexedDB 设置表；窗口模式存桥的 window-pref.json
+           （启动脚本要在网页加载之前读它，所以只能落盘成文件）。 -->
+      <div class="data-block browser-block">
+        <h4 class="block-title">浏览器与打开方式</h4>
+        <p class="muted">
+          工作台里的链接默认交给<strong>系统默认浏览器</strong>。这里登记本机安装的浏览器后，
+          既能把某一个设为<strong>全局默认</strong>，也能给<strong>单条链接</strong>单独指定
+          （任务 / 子任务 / 预设任务的「跳转链接」行、以及总览的快捷入口里都能选）。
+          这里填的是<strong>本机</strong>路径，换电脑需要重新登记。
+        </p>
+
+        <div class="browser-list">
+          <div v-for="b in browserList" :key="b.id" class="browser-row">
+            <input v-model="b.name" class="sample-input browser-name" placeholder="名称（如 Edge）" @change="saveBrowsers" />
+            <input v-model="b.exe" class="sample-input browser-exe" placeholder="C:\Program Files\...\msedge.exe" @change="saveBrowsers" />
+            <button class="ghost sm" @click="pickBrowserExe(b)">浏览…</button>
+            <button class="ghost sm" @click="removeBrowser(b)">删除</button>
+          </div>
+          <div v-if="!browserList.length" class="muted">
+            还没有登记浏览器。点下面「检测本机常见浏览器」，或「添加浏览器」后手动选 exe。
+          </div>
+        </div>
+
+        <div class="row" style="flex-wrap: wrap; gap: 8px; margin-top: 8px">
+          <button class="ghost" @click="addBrowser">添加浏览器</button>
+          <button class="ghost" :disabled="detectingBrowsers" @click="detectBrowserList">{{ detectingBrowsers ? '检测中…' : '检测本机常见浏览器' }}</button>
+        </div>
+
+        <div class="set-row" style="margin-top: 12px">
+          <label>默认用哪个打开网页</label>
+          <select v-model="defaultBrowserId" class="sample-select" @change="saveBrowsers">
+            <option :value="''">跟随系统默认</option>
+            <option v-for="b in browserList" :key="b.id" :value="b.id">{{ b.name || b.exe || '（未命名）' }}</option>
+          </select>
+        </div>
+
+        <div class="set-row" style="margin-top: 12px">
+          <label>工作台窗口</label>
+          <select v-model="windowMode" class="sample-select" @change="saveWindowMode">
+            <option value="maximized">每次最大化</option>
+            <option value="remember">记住上次尺寸</option>
+          </select>
+        </div>
+        <p class="muted" style="margin-top: 4px">
+          「记住上次尺寸」= 不再向浏览器传固定窗口大小，改由浏览器自己记住这个地址上次的尺寸。
+          <strong>下次重新打开工作台生效</strong>：窗口由启动脚本打开，脚本运行在网页加载之前。
+        </p>
+        <p v-if="windowModeTip" :class="windowModeTipErr ? 'err' : 'ok'" style="margin-top: 6px">{{ windowModeTip }}</p>
+        <p v-if="linkTip" :class="linkTipErr ? 'err' : 'ok'" style="margin-top: 6px">{{ linkTip }}</p>
       </div>
 
       <div class="data-block cloud-block">
@@ -1876,9 +2075,13 @@ async function clearAll() {
                       <div v-for="(lnk, li) in newRuleLinks" :key="li" class="inline-link-row">
                         <input v-model="newRuleLinks[li].label" placeholder="名称（如：周报）" class="sample-input link-name" />
                         <input v-model="newRuleLinks[li].url" placeholder="https://… 或本地路径 D:\xxx\a.exe" class="sample-input link-url" />
+                        <select v-model="newRuleLinks[li].browser" class="link-browser" title="这条链接用哪个浏览器打开（默认 = 跟随下面「浏览器与打开方式」里的全局默认）">
+                          <option value="">默认浏览器</option>
+                          <option v-for="b in browserOptions" :key="b.id" :value="b.id">{{ b.name || b.exe }}</option>
+                        </select>
                         <button class="inline-del" type="button" @click="newRuleLinks.splice(li, 1)">×</button>
                       </div>
-                      <button class="ghost sm add-inline" type="button" @click="newRuleLinks.push({ url: '', label: '' })">+ 添加快捷链接</button>
+                      <button class="ghost sm add-inline" type="button" @click="newRuleLinks.push({ url: '', label: '', browser: '' })">+ 添加快捷链接</button>
                     </div>
                   </div>
 
@@ -1898,9 +2101,13 @@ async function clearAll() {
                         <div v-for="(lnk, li) in s.links" :key="li" class="sub-link-row">
                           <input v-model="s.links[li].label" placeholder="链接名" class="sample-input sub-link-name" />
                           <input v-model="s.links[li].url" placeholder="URL" class="sample-input sub-link-url" />
+                          <select v-model="s.links[li].browser" class="link-browser" title="这条链接用哪个浏览器打开（默认 = 跟随全局默认）">
+                            <option value="">默认浏览器</option>
+                            <option v-for="b in browserOptions" :key="b.id" :value="b.id">{{ b.name || b.exe }}</option>
+                          </select>
                           <button class="inline-del" type="button" @click="s.links.splice(li, 1)">×</button>
                         </div>
-                        <button class="ghost sm add-inline" type="button" @click="(s.links ||= []).push({ url: '', label: '' })">+ 添加链接</button>
+                        <button class="ghost sm add-inline" type="button" @click="(s.links ||= []).push({ url: '', label: '', browser: '' })">+ 添加链接</button>
                       </div>
                       <button class="ghost sm add-inline" @click="addSubtask">+ 添加子任务</button>
                     </div>
@@ -1970,6 +2177,31 @@ async function clearAll() {
 }
 .data-block + .data-block {
   margin-top: 6px;
+}
+/* 浏览器与打开方式（第 43 轮）：一行 = 名称 + exe 路径 + 浏览… + 删除 */
+.browser-list {
+  display: grid;
+  gap: 6px;
+}
+.browser-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.browser-row .browser-name {
+  flex: 0 0 150px;
+  min-width: 0;
+}
+.browser-row .browser-exe {
+  flex: 1;
+  min-width: 200px;
+}
+@media (max-width: 640px) {
+  .browser-row .browser-name,
+  .browser-row .browser-exe {
+    flex: 1 1 100%;
+  }
 }
 .block-title {
   margin: 0 0 8px;
@@ -3332,6 +3564,26 @@ code {
 }
 .sub-link-row .sub-link-url {
   min-width: 160px;
+}
+/* 第 43 轮：规则编辑器里的「用哪个浏览器」下拉（快捷链接行 / 预设子任务链接行共用） */
+.inline-link-row .link-browser,
+.sub-link-row .link-browser {
+  flex: none;
+  width: 104px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.inline-link-row .link-browser:focus,
+.sub-link-row .link-browser:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
 }
 .inline-sub-card .add-inline {
   justify-self: start;

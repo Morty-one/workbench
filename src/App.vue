@@ -15,6 +15,8 @@ import { bootCloudSync } from './sync/cloudsync'
 import { docState, requestDocOutput, startRun, restoreDocRun, closeDocModal, resetDocRun, normalizeAPath } from './docoutput.js'
 // 第 42 轮：把库里已存的「被误加协议的本地路径链接」订正为干净路径（幂等，跑一遍即收敛）
 import { fixLocalLinkUrls } from './utils/locallinkfix.js'
+// 第 43 轮：浏览器偏好（链接指定浏览器 / 全局默认）——启动时把缓存读起来供点击瞬间同步取用
+import { loadBrowserPrefs } from './utils/browserPref.js'
 
 const manualPath = ref('')
 const copiedDiagnostics = ref(false)
@@ -45,6 +47,18 @@ function onOpenFail(e) {
   openFailMsg.value = '本地软件唤醒失败：' + (d.error || '本地桥未响应') + '（链接：' + (d.target || d.url || '') + '）'
   if (openFailTimer) clearTimeout(openFailTimer)
   openFailTimer = setTimeout(() => { openFailMsg.value = '' }, 9000)
+}
+
+/* 软提示：指定的浏览器不可用 / 本地桥未响应时「改用系统默认打开」——
+   不是失败（链接确实打开了），但绝不能静默换掉用户的选择，所以单独用一条中性提示条。 */
+const openNoteMsg = ref('')
+let openNoteTimer = null
+function onOpenNote(e) {
+  const msg = ((e && e.detail) || {}).msg || ''
+  if (!msg) return
+  openNoteMsg.value = msg
+  if (openNoteTimer) clearTimeout(openNoteTimer)
+  openNoteTimer = setTimeout(() => { openNoteMsg.value = '' }, 9000)
 }
 
 function submitManualPath() {
@@ -460,12 +474,17 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('wb:goto', onGotoEvent)
   window.addEventListener('wb:open-fail', onOpenFail)
+  window.addEventListener('wb:open-note', onOpenNote)
+  // 浏览器偏好（第 43 轮）：链接点击那一刻要同步取到「该用哪个 exe」，先把缓存读起来。
+  // 读失败不影响任何功能（内部一律退回系统默认），所以不 await 到阻塞启动流程里。
+  loadBrowserPrefs().catch(() => {})
 })
 onUnmounted(() => {
   clearInterval(timer)
   clearInterval(metricTimer)
   window.removeEventListener('wb:goto', onGotoEvent)
   window.removeEventListener('wb:open-fail', onOpenFail)
+  window.removeEventListener('wb:open-note', onOpenNote)
   document.removeEventListener('visibilitychange', onVisibility)
   document.removeEventListener('mousedown', onDocMouseDown)
   window.removeEventListener('keydown', onSkinKey)
@@ -487,6 +506,8 @@ function trend(value, prev) {
     <div v-if="appError" class="app-err-bar" @click="appError = ''" title="点击关闭">页面脚本错误：{{ appError }}（点此关闭）</div>
     <!-- 本地软件唤醒失败提示（localOpen 桥调用失败时） -->
     <div v-if="openFailMsg" class="app-msg-bar" @click="openFailMsg = ''" title="点击关闭">{{ openFailMsg }}</div>
+    <!-- 软提示（不是失败）：指定的浏览器不可用时改用系统默认打开，如实告知，不静默换掉 -->
+    <div v-if="openNoteMsg" class="app-msg-bar note" @click="openNoteMsg = ''" title="点击关闭">{{ openNoteMsg }}</div>
     <!-- 移动端顶部栏（仅 ≤720px 显示）：当前页标题 + 调出任务总览 -->
     <header class="m-appbar">
       <div class="m-title">{{ currentTitle }}</div>
@@ -1872,6 +1893,14 @@ function trend(value, prev) {
   border-top: none;
 }
 .app-err-bar + .app-msg-bar { top: 34px; }
+/* 第 43 轮：软提示条（.note）与失败条可能同时存在，两条都要错开，不能叠在同一位置 */
+.app-msg-bar + .app-msg-bar { top: 34px; }
+.app-err-bar + .app-msg-bar + .app-msg-bar { top: 68px; }
+.app-msg-bar.note {
+  background: #1e3a5f;
+  color: #cfe3ff;
+  border-color: #3b82f6;
+}
 
 .do-modal-mask {
   position: fixed;

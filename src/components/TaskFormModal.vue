@@ -13,10 +13,12 @@
     submit       - 提交时携带完整表单数据（深拷贝）
 -->
 <script setup>
-import { reactive, computed, watch } from 'vue'
+import { reactive, computed, watch, ref } from 'vue'
 import VoiceInput from './VoiceInput.vue'
 // 第 42 轮：保存前剥壳，防止本地路径被存成 `https://"C:\…"`
 import { localPathOf } from '../utils/localOpen.js'
+// 第 43 轮：链接级「用哪个浏览器打开」（存浏览器 id，不存 exe 路径）
+import { loadBrowserPrefs, getBrowserList } from '../utils/browserPref.js'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -92,6 +94,22 @@ watch(
 )
 
 // 子任务 / 链接 辅助
+// 「用哪个浏览器打开」下拉的可选项：空 id = 跟随全局默认（在设置中心配）
+const browserOptions = ref([])
+async function refreshBrowserOptions() {
+  try {
+    await loadBrowserPrefs()
+    browserOptions.value = getBrowserList()
+  } catch (e) {
+    browserOptions.value = []
+  }
+}
+watch(
+  () => props.show,
+  (v) => { if (v) refreshBrowserOptions() },
+  { immediate: true }
+)
+
 function addFormSubtask() {
   form.subtasks.push({
     id: 'sub_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
@@ -107,7 +125,7 @@ function removeFormSubtask(i) {
 }
 function addFormSubLink(s) {
   if (!s.links) s.links = []
-  s.links.push({ url: '', label: '打开' })
+  s.links.push({ url: '', label: '打开', browser: '' })
 }
 function removeFormSubLink(s, i) {
   s.links.splice(i, 1)
@@ -120,6 +138,9 @@ function normalizeLinks(list) {
     if (!l || typeof l !== 'object') continue
     const p = localPathOf(l.url)
     if (p) l.url = p
+    // 第 43 轮：browser 统一成字符串 id；空值删掉，避免库里堆一堆 browser:'' 的脏字段
+    l.browser = (l.browser == null ? '' : String(l.browser)).trim()
+    if (!l.browser) delete l.browser
   }
   return list
 }
@@ -182,9 +203,13 @@ function close() {
             <div v-for="(lnk, li) in form.links" :key="li" class="link-row">
               <input v-model="form.links[li].url" placeholder="https://… 或本地路径 D:\xxx\a.exe（可留空）" />
               <input v-model="form.links[li].label" placeholder="名称（默认：打开）" class="link-label" />
+              <select v-model="form.links[li].browser" class="link-browser" title="这条链接用哪个浏览器打开（默认 = 跟随设置中心「浏览器与打开方式」里的全局默认）">
+                <option value="">默认浏览器</option>
+                <option v-for="b in browserOptions" :key="b.id" :value="b.id">{{ b.name || b.exe }}</option>
+              </select>
               <button class="ghost sm danger" type="button" @click="form.links.splice(li, 1)">删除</button>
             </div>
-            <button class="ghost sm" type="button" @click="form.links.push({ url: '', label: '打开' })">+ 添加链接</button>
+            <button class="ghost sm" type="button" @click="form.links.push({ url: '', label: '打开', browser: '' })">+ 添加链接</button>
           </div>
         </div>
         <div style="grid-column: 1 / -1">
@@ -207,6 +232,10 @@ function close() {
                   <div v-for="(u, ui) in s.links" :key="ui" class="form-sub-link-row">
                     <input v-model="s.links[ui].url" placeholder="https://… 或 D:\xxx\a.exe" />
                     <input v-model="s.links[ui].label" placeholder="名称" class="link-label" />
+                    <select v-model="s.links[ui].browser" class="link-browser" title="这条链接用哪个浏览器打开（默认 = 跟随设置中心里的全局默认）">
+                      <option value="">默认浏览器</option>
+                      <option v-for="b in browserOptions" :key="b.id" :value="b.id">{{ b.name || b.exe }}</option>
+                    </select>
                     <button class="ghost sm danger" type="button" @click="removeFormSubLink(s, ui)">删除</button>
                   </div>
                   <button class="ghost sm" type="button" @click="addFormSubLink(s)">+ 添加链接</button>
@@ -409,6 +438,26 @@ function close() {
 }
 .form-sub-link-row .link-label {
   flex: 0 0 96px;
+}
+/* 第 43 轮：「用哪个浏览器打开」下拉（任务链接行 / 子任务链接行共用 .link-browser） */
+.link-row .link-browser,
+.form-sub-link-row .link-browser {
+  flex: none;
+  width: 104px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-solid);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.link-row .link-browser:focus,
+.form-sub-link-row .link-browser:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
 }
 @media (max-width: 520px) {
   .form-sub-body {
