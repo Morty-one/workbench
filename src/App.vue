@@ -13,6 +13,8 @@ import { seedIfEmpty, ensureDefaultProject } from './seed'
 import { isMobileDevice } from './env'
 import { bootCloudSync } from './sync/cloudsync'
 import { docState, requestDocOutput, startRun, restoreDocRun, closeDocModal, resetDocRun, normalizeAPath } from './docoutput.js'
+// 第 42 轮：把库里已存的「被误加协议的本地路径链接」订正为干净路径（幂等，跑一遍即收敛）
+import { fixLocalLinkUrls } from './utils/locallinkfix.js'
 
 const manualPath = ref('')
 const copiedDiagnostics = ref(false)
@@ -446,6 +448,10 @@ onMounted(async () => {
   await bootCloudSync()
   await seedIfEmpty()
   await ensureDefaultProject() // 老用户 / 清空过数据的场景兜底
+  // 第 42 轮：订正历史坏链接（`https://"C:\…"` ⇒ `C:\…`）。
+  // 必须排在 bootCloudSync 之后 —— 若这趟刚做过整库还原，先让还原落地再订正，避免被覆盖；
+  // 订正本身幂等，即便还原把旧值带回来，下一次启动也会再修一遍。
+  await fixLocalLinkUrls()
   await primeReminded()
   await loadMetrics()
   await restoreDocRun()

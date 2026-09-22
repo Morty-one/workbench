@@ -15,6 +15,8 @@
 <script setup>
 import { reactive, computed, watch } from 'vue'
 import VoiceInput from './VoiceInput.vue'
+// 第 42 轮：保存前剥壳，防止本地路径被存成 `https://"C:\…"`
+import { localPathOf } from '../utils/localOpen.js'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -111,8 +113,21 @@ function removeFormSubLink(s, i) {
   s.links.splice(i, 1)
 }
 
+// 保存前把「被误加协议的本地路径」剥回干净路径（幂等：正常网址原样返回）
+function normalizeLinks(list) {
+  if (!Array.isArray(list)) return list
+  for (const l of list) {
+    if (!l || typeof l !== 'object') continue
+    const p = localPathOf(l.url)
+    if (p) l.url = p
+  }
+  return list
+}
+
 function localSubmit() {
   if (!form.title.trim()) return
+  normalizeLinks(form.links)
+  for (const s of form.subtasks || []) normalizeLinks(s.links)
   // 深拷贝后抛给父组件，避免后续修改影响父组件已收到的数据
   emit('submit', JSON.parse(JSON.stringify(form)))
 }
@@ -162,10 +177,10 @@ function close() {
           </div>
         </div>
         <div style="grid-column: 1 / -1">
-          <label>跳转链接（可多个）</label>
+          <label>跳转链接（可多个，支持本地程序/文件路径）</label>
           <div class="link-edit">
             <div v-for="(lnk, li) in form.links" :key="li" class="link-row">
-              <input v-model="form.links[li].url" placeholder="https://...（可留空）" />
+              <input v-model="form.links[li].url" placeholder="https://… 或本地路径 D:\xxx\a.exe（可留空）" />
               <input v-model="form.links[li].label" placeholder="名称（默认：打开）" class="link-label" />
               <button class="ghost sm danger" type="button" @click="form.links.splice(li, 1)">删除</button>
             </div>
@@ -190,7 +205,7 @@ function close() {
                 <span class="form-sub-links-label">跳转链接</span>
                 <div class="form-sub-link-rows">
                   <div v-for="(u, ui) in s.links" :key="ui" class="form-sub-link-row">
-                    <input v-model="s.links[ui].url" placeholder="https://..." />
+                    <input v-model="s.links[ui].url" placeholder="https://… 或 D:\xxx\a.exe" />
                     <input v-model="s.links[ui].label" placeholder="名称" class="link-label" />
                     <button class="ghost sm danger" type="button" @click="removeFormSubLink(s, ui)">删除</button>
                   </div>

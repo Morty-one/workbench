@@ -8,6 +8,8 @@ import { configureCloud, configureSchedule, runSync, onCloudState, testCloudConn
 import { loadSyncLog, loadPullLog, clearSyncLog, clearPullLog, SYNC_LOG_HEAD, deviceLabelOf } from '../sync/synclog'
 import { ensureDefaultProject } from '../seed'
 import { SHIFT_OPTIONS, WEEKDAY_LABELS, weekdayText } from '../shift'
+// 第 42 轮：链接保存前先剥壳，避免把本地路径存成 `https://"C:\…"`（详见 localOpen.js 文件头）
+import { localPathOf } from '../utils/localOpen.js'
 import * as XLSX_NS from 'xlsx-js-style'
 import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate'
 
@@ -962,6 +964,13 @@ function previewText(r) {
 function normalizeUrl(u) {
   const s = (u || '').trim()
   if (!s) return ''
+  // 第 42 轮：**先剥壳**再判协议。
+  // 历史事故：用户在提示为「https://…」的输入框里先敲了协议、再粘上带引号的本地路径
+  // ⇒ 存成 `https://"C:\…\a.lnk"` ⇒ 原逻辑首行 `^https?://` 直接放过不再规范化
+  // ⇒ 点击时被当成网页交给浏览器，本地程序永远打不开。
+  // localPathOf() 只在「剥掉协议后确实是盘符路径/UNC」时才返回非空 ⇒ 正常网址不受影响。
+  const lp = localPathOf(s)
+  if (lp) return lp
   if (/^https?:\/\//i.test(s)) return s
   if (/^mailto:/i.test(s)) return s
   if (/^app:\/\//i.test(s)) return s
@@ -1866,7 +1875,7 @@ async function clearAll() {
                     <div class="inline-links">
                       <div v-for="(lnk, li) in newRuleLinks" :key="li" class="inline-link-row">
                         <input v-model="newRuleLinks[li].label" placeholder="名称（如：周报）" class="sample-input link-name" />
-                        <input v-model="newRuleLinks[li].url" placeholder="链接 URL" class="sample-input link-url" />
+                        <input v-model="newRuleLinks[li].url" placeholder="https://… 或本地路径 D:\xxx\a.exe" class="sample-input link-url" />
                         <button class="inline-del" type="button" @click="newRuleLinks.splice(li, 1)">×</button>
                       </div>
                       <button class="ghost sm add-inline" type="button" @click="newRuleLinks.push({ url: '', label: '' })">+ 添加快捷链接</button>

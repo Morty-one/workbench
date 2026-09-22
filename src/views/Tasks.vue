@@ -3,7 +3,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { db } from '../db'
 import * as XLSX from 'xlsx-js-style'
 import { marked } from 'marked'
-import { openExternal } from '../utils/localOpen.js'
+import { openExternal, localPathOf } from '../utils/localOpen.js'
 import { docState, requestDocOutput } from '../docoutput.js'
 import { shiftKeyOf } from '../shift'
 import TaskFormModal from '../components/TaskFormModal.vue'
@@ -869,6 +869,12 @@ function edit(t) {
   }
   showForm.value = true
 }
+// 链接落库前的统一归一（第 42 轮）：本地路径先剥壳，避免存成 `https://"C:\…"` 后点不开
+function normLinks(list) {
+  return (list || [])
+    .filter((l) => (l && (l.url || '').trim()))
+    .map((l) => ({ url: localPathOf(l.url) || l.url.trim(), label: (l.label || '打开').trim() || '打开' }))
+}
 async function onFormSubmit(data) {
   if (!data.title.trim()) return
   const nowTs = Date.now()
@@ -893,9 +899,7 @@ async function onFormSubmit(data) {
       done: !!s.done,
       dueTime: (s.dueTime || '').trim(),
       remindTime: (s.remindTime || '').trim(),
-      links: (s.links || [])
-        .filter((l) => (l && (l.url || '')).trim())
-        .map((l) => ({ url: (l.url || '').trim(), label: (l.label || '打开').trim() || '打开' }))
+      links: normLinks(s.links)
     }))
   // 有子任务时：父任务不单独设提醒，取子任务中最近的提醒时间
   const hasSubs = plainSubtasks.length > 0
@@ -919,7 +923,7 @@ async function onFormSubmit(data) {
       nextRemindAt,
       dueTime: (data.dueTime || '').trim(),
       remark: data.remark,
-      links: data.links.filter((l) => (l.url || '').trim()).map((l) => ({ url: l.url.trim(), label: (l.label || '打开').trim() || '打开' })),
+      links: normLinks(data.links),
       subtasks: plainSubtasks
     })
   } else {
@@ -935,7 +939,7 @@ async function onFormSubmit(data) {
       dayKey,
       completedAt: null,
       remark: data.remark,
-      links: data.links.filter((l) => (l.url || '').trim()).map((l) => ({ url: l.url.trim(), label: (l.label || '打开').trim() || '打开' })),
+      links: normLinks(data.links),
       subtasks: plainSubtasks
     })
   }

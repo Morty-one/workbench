@@ -9,7 +9,7 @@ import { db } from '../db'
 import { ensureDefaultProject } from '../seed'
 import { resolveWeekProjectForDate } from '../autoProjects'
 import { shiftKeyOf, weekdayOf, isWeekend, isWorkingDay, isSingleShiftDay, SHIFT_KEYS } from '../shift'
-import { openExternal } from '../utils/localOpen.js'
+import { openExternal, localPathOf } from '../utils/localOpen.js'
 import ProjectStack from './ProjectStack.vue'
 import ProjectManager from './ProjectManager.vue'
 import TaskFormModal from '../components/TaskFormModal.vue'
@@ -80,6 +80,12 @@ function openQuickAdd() {
 function closeQuickAdd() {
   showQuickAdd.value = false
 }
+// 链接落库前的统一归一（第 42 轮）：本地路径先剥壳，避免存成 `https://"C:\…"` 后点不开
+function normLinks(list) {
+  return (list || [])
+    .filter((l) => (l && (l.url || '').trim()))
+    .map((l) => ({ url: localPathOf(l.url) || l.url.trim(), label: (l.label || '打开').trim() || '打开' }))
+}
 async function onQuickSubmit(data) {
   const title = (data.title || '').trim()
   if (!title) return
@@ -104,11 +110,9 @@ async function onQuickSubmit(data) {
       done: !!s.done,
       dueTime: (s.dueTime || '').trim(),
       remindTime: (s.remindTime || '').trim(),
-      links: (s.links || []).filter((l) => (l && (l.url || '')).trim()).map((l) => ({ url: (l.url || '').trim(), label: (l.label || '打开').trim() || '打开' }))
+      links: normLinks(s.links)
     }))
-  const plainLinks = (data.links || [])
-    .filter((l) => (l && (l.url || '')).trim())
-    .map((l) => ({ url: (l.url || '').trim(), label: (l.label || '打开').trim() || '打开' }))
+  const plainLinks = normLinks(data.links)
   await db.tasks.add({
     title,
     projectId: data.projectId || projects.value[0]?.id || null,
@@ -896,7 +900,8 @@ function editShortcut(s) {
 }
 async function saveShortcut() {
   const name = newShortcut.name.trim()
-  const url = newShortcut.url.trim()
+  // 第 42 轮：本地路径若被写成长 `https://"C:\…"` 会被当成网页，点击永远打不开 ⇒ 先剥壳
+  const url = localPathOf(newShortcut.url) || newShortcut.url.trim()
   const icon = newShortcut.icon.trim()
   if (!name || !url) return
   if (editingShortcutId.value != null) {
@@ -1091,7 +1096,7 @@ async function onProjectsChanged() {
         <input v-model="newShortcut.name" class="sc-input" placeholder="名称" @keyup.enter="saveShortcut" />
         <VoiceInput v-model="newShortcut.name" />
         <input v-model="newShortcut.icon" class="sc-input" style="max-width: 140px" placeholder="图标（emoji / mail / board）" @keyup.enter="saveShortcut" />
-        <input v-model="newShortcut.url" class="sc-input" placeholder="链接 URL（https://…）" @keyup.enter="saveShortcut" />
+        <input v-model="newShortcut.url" class="sc-input" placeholder="链接 URL 或本地路径（D:\xxx\a.exe）" @keyup.enter="saveShortcut" />
         <button class="primary sm" @click="saveShortcut">{{ editingShortcutId != null ? '保存修改' : '+ 添加' }}</button>
         <button v-if="editingShortcutId != null" class="ghost sm" @click="resetShortcutForm">取消</button>
       </div>
