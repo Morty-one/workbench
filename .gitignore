@@ -27,6 +27,23 @@ window-pref.json
 scripts/win-max.exe
 scripts/win-max.exe.sha1
 
+# 第 46e 轮：文档输出（Excel/WPS 一键输出）的**运行期交接文件**，落在项目根目录。
+# 每次在「文档输出」页点开始输出都会重写，且 doc-output-job.json 里含本机真实 Excel 路径，
+# 而本仓库是**公开**的 ⇒ 永不提交。
+#   doc-output-job.json    = 网页写的入参（源文件 / 模板 / 输出目录 / sheet 配置）
+#   doc-output-result.json = 脚本写的结果（哪一步成功/失败、错误信息），网页再读回显示
+doc-output-job.json
+doc-output-result.json
+
+# 第 46e 轮：文档输出自动化（scripts/planB.cjs 起 Chromium）留下的旧浏览器 profile 目录；
+# 现用目录是 _pw_kdocs_profile（已被下面的 _* 规则覆盖），这个 8/29 的空壳不该进仓库
+.kdocs-profile/
+
+# 第 46e 轮：用户决定**不入库**的遗留脚本 —— 8/29 那版本地 whisper 语音方案的转写脚本。
+# 当天已改回浏览器原生语音（src/components/VoiceInput.vue 用 Web Speech），此脚本零引用。
+# 本地文件保留（不删用户文件），只是不进仓库；要恢复入库：删掉这行再 git add。
+scripts/asr_transcribe.py
+
 # logs
 *.log
 .wb_pids.txt
