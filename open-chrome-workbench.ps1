@@ -33,8 +33,10 @@ $chrome = @(
 
 if ($chrome) {
     # Round 43: honour the same window mode as launch-workbench.ps1 (window-pref.json).
+    # Round 46d: same WB_WINDOW_PREF override, so tests never touch the real pref file.
     $windowMode = 'maximized'
     $prefFile = Join-Path $ProjectDir 'window-pref.json'
+    if ($env:WB_WINDOW_PREF) { $prefFile = $env:WB_WINDOW_PREF }
     if (Test-Path $prefFile) {
         try {
             $pref = Get-Content -Path $prefFile -Raw | ConvertFrom-Json

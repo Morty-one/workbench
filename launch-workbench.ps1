@@ -12,6 +12,51 @@ $BridgeScript = Join-Path $ProjectDir 'local-bridge.cjs'
 # exactly those (not by fragile command-line pattern matching) on next start.
 $PidFile = Join-Path $ProjectDir '.wb_pids.txt'
 
+# ---------- C# type cache (round 45 speed-up) ----------
+# Add-Type compiles the C# source AT RUNTIME with csc (measured ~1.0s). We need a Win32 helper
+# here (and again in scripts\win-max.ps1), and that compile used to be paid on every single
+# launch / every link click. Compile the same source once into a cached assembly under %TEMP%
+# and load that from then on (measured ~0.05s). The file name carries a hash of the source text,
+# so editing the C# below automatically produces a NEW file -- nothing to invalidate by hand.
+# Returns: cache | compile | fallback | fail. Never throws on its own.
+function Get-CachedType {
+  param([string]$CacheTag, [string]$Source, [string]$TypeName)
+  # measured 2026-09-25: `Add-Type -TypeDefinition X -OutputAssembly f.dll` WRITES the assembly but
+  # does not reliably bring the types into this session -- a cache-miss run therefore left the
+  # helper type undefined and the caller silently skipped its work. So (a) the cached assembly is
+  # always also loaded with -Path, and (b) the outcome is verified by resolving the type NAME.
+  $dir = Join-Path $env:TEMP 'wb-type-cache'
+  $dll = ''
+  try {
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    $hash = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Source)) | ForEach-Object { $_.ToString('x2') }) -join '')
+    try { $sha.Dispose() } catch {}
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $dll = Join-Path $dir ('wb-' + $CacheTag + '-' + $hash.Substring(0, 12) + '.dll')
+  } catch { $dll = '' }
+  # (1) cache hit: load the prebuilt assembly -- no csc involved (measured ~27ms vs ~1.0s)
+  if ($dll -ne '' -and (Test-Path $dll)) {
+    try { Add-Type -Path $dll -ErrorAction Stop } catch {}
+    $ok = $false
+    try { [void][type]$TypeName; $ok = $true } catch {}
+    if ($ok) { return 'cache' }
+  }
+  # (2) miss: compile once into the cache file, then make sure the types really are loaded
+  if ($dll -ne '') {
+    try { Add-Type -TypeDefinition $Source -OutputAssembly $dll -ErrorAction Stop } catch {}
+    if (Test-Path $dll) { try { Add-Type -Path $dll -ErrorAction Stop } catch {} }
+    $ok = $false
+    try { [void][type]$TypeName; $ok = $true } catch {}
+    if ($ok) { return 'compile' }
+  }
+  # (3) last resort: in-memory compile (temp dir unwritable / assembly locked / csc produced nothing)
+  try { Add-Type -TypeDefinition $Source -ErrorAction Stop } catch {}
+  $ok = $false
+  try { [void][type]$TypeName; $ok = $true } catch {}
+  if ($ok) { return 'fallback' }
+  return 'fail'
+}
+
 # ---------- Loading splash in a SEPARATE hidden process ----------
 # Kept apart so a display-less environment can never block the main flow.
 $splashCode = @'
@@ -70,12 +115,33 @@ try {
     #    pattern matching, so even orphaned/old bridge processes get removed.
     #    A guard checks the process command line to avoid killing an unrelated
     #    process whose PID was recycled after a reboot.
+    #
+    #    Round 45 speed-up: take ONE node.exe snapshot and match everything in memory.
+    #    The old code called Get-WmiObject six times here plus once per recorded PID
+    #    (measured 117-306ms each => ~1.2s of startup just waiting for WMI) and called
+    #    Get-NetTCPConnection (CIM, measured 1316ms on first use) unconditionally.
+    #    The snapshot is deliberately taken BEFORE anything is killed, so a process we
+    #    are about to start can never be matched.
+    $nodeSnaps = @()
+    try { $nodeSnaps = @(Get-WmiObject Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue) } catch {}
+
+    # Cheap port probe: a 200ms TCP connect instead of the CIM query. We only need to know
+    # "is anything still listening here"; WHO owns it only matters if the cheap pass missed it.
+    function Test-PortBusy([int]$p) {
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $iar = $client.BeginConnect('127.0.0.1', $p, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(200)) { $client.EndConnect($iar); return $true }
+            return $false
+        } catch { return $false } finally { try { $client.Close() } catch {} }
+    }
+
     if (Test-Path $PidFile) {
         Get-Content -Path $PidFile -ErrorAction SilentlyContinue | ForEach-Object {
             $pidv = $_.Trim()
             if ($pidv -match '^\d+$') {
                 try {
-                    $proc = Get-WmiObject Win32_Process -Filter ("ProcessId=" + $pidv) -ErrorAction SilentlyContinue
+                    $proc = $nodeSnaps | Where-Object { $_.ProcessId -eq [int]$pidv } | Select-Object -First 1
                     if ($proc -and ($proc.CommandLine -like '*local-bridge.cjs*' -or `
                                     $proc.CommandLine -like '*vite*preview*' -or `
                                     $proc.CommandLine -like ('*' + $ProjectDir + '*'))) {
@@ -88,39 +154,48 @@ try {
     }
 
     # 1) Kill any stale listener on the port so we always serve the latest build.
+    #    Round 45: order flipped to cheap-first. The command-line pass runs unconditionally
+    #    (it catches our own vite preview / anything with the port in its command line), and
+    #    the expensive TCP-owner lookup only happens if the port is STILL busy afterwards.
+    #    The set of processes killed is unchanged -- this only avoids paying ~1.3s for a CIM
+    #    query that the first pass has already solved.
     function Kill-PortListener($p) {
-        # (a) by TCP owner PID - most precise
-        try {
-            Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue |
-                ForEach-Object { try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {} }
-        } catch {}
-        # (b) by command line - catches listeners the TCP lookup missed
-        try {
-            Get-WmiObject Win32_Process -Filter "Name='node.exe'" | Where-Object {
-                ($_.CommandLine -like '*vite*') -and (($_.CommandLine -like '*preview*') -or ($_.CommandLine -like "*$p*"))
-            } | ForEach-Object {
-                try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
-            }
-        } catch {}
+        # (a) by command line - catches listeners the TCP lookup would have found
+        foreach ($proc in $nodeSnaps) {
+            try {
+                if (($proc.CommandLine -like '*vite*') -and (($proc.CommandLine -like '*preview*') -or ($proc.CommandLine -like "*$p*"))) {
+                    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
+        }
+        # (b) still busy => something the command line cannot identify owns it; ask TCP who
+        if (Test-PortBusy $p) {
+            try {
+                Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue |
+                    ForEach-Object { try { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } catch {} }
+            } catch {}
+        }
     }
     Kill-PortListener $Port
     # 1b) Kill any stale local-bridge helper so the new one can bind 4567.
     Kill-PortListener $BridgePort
-    Get-WmiObject Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*local-bridge.cjs*' } | ForEach-Object {
-        try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
-    }
-    # 1c) Extra safety: also kill any node.exe whose command line points to this project's bridge
-    Get-WmiObject Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like "*$ProjectDir*local-bridge.cjs*" } | ForEach-Object {
-        try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+    # 1c) The bridge itself. The old 1b/1c pair was redundant ('*local-bridge.cjs*' already
+    #     covers the project-path variant), so one pass over the snapshot replaces both.
+    foreach ($proc in $nodeSnaps) {
+        try {
+            if ($proc.CommandLine -like '*local-bridge.cjs*') {
+                Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        } catch {}
     }
     # give the OS a moment to release the socket (re-check below still guards slow releases)
     Start-Sleep -Milliseconds 400
     # re-check; if still bound, try once more before giving up
-    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+    if (Test-PortBusy $Port) {
         Kill-PortListener $Port
         Start-Sleep -Milliseconds 1000
     }
-    if (Get-NetTCPConnection -LocalPort $BridgePort -State Listen -ErrorAction SilentlyContinue) {
+    if (Test-PortBusy $BridgePort) {
         Kill-PortListener $BridgePort
         Start-Sleep -Milliseconds 1000
     }
@@ -257,11 +332,18 @@ try {
     # Window mode (round 43): read window-pref.json, which the web UI writes through the local
     # bridge (Settings -> browser & open-with). The web page cannot tell us anything here --
     # it does not exist yet -- so the choice has to be persisted to a file.
-    #   maximized (default) = pass a fixed size + --start-maximized, then force-maximize via Win32
+    #   maximized (default) = pass the COMPUTED work-area size + --start-maximized, then
+    #                         force-maximize via Win32 (see round 46b note below: the size must be
+    #                         handed in, otherwise the window is born small and jumps later)
     #   remember            = pass NO size/maximize flag at all, so the browser restores its own
     #                         last window placement for this URL (Edge/Chrome remember it per app)
     $windowMode = 'maximized'
     $prefFile = Join-Path $ProjectDir 'window-pref.json'
+    # Round 46d: WB_WINDOW_PREF overrides the pref file path so automated tests can point at
+    # their own temp file and never touch the real window-pref.json. (The sandbox has a per-turn
+    # file-delete quota; when the cleanup unlink fails it is swallowed, which once silently left
+    # the user's setting stuck on 'remember' -- i.e. click-to-maximize quietly disabled.)
+    if ($env:WB_WINDOW_PREF) { $prefFile = $env:WB_WINDOW_PREF }
     if (Test-Path $prefFile) {
         try {
             $pref = Get-Content -Path $prefFile -Raw | ConvertFrom-Json
@@ -280,7 +362,34 @@ try {
     if ($windowMode -eq 'remember') {
         $appArgs = @('--app=' + $openUrl)
     } else {
-        $appArgs = @('--app=' + $openUrl, '--window-size=1440,900', '--start-maximized')
+        # Round 46b (2026-09-25): HAND THE BORN SIZE IN AGAIN -- computed, not the old literal 1440,900.
+        # Round 45 removed --window-size completely, and that made the window appear at whatever size
+        # the browser remembered and only grow to maximized about a second later -- reported by the
+        # user as "it opens a non-fullscreen window first, then jumps to fullscreen".
+        # --start-maximized cannot cover that on its own: when the browser is ALREADY running, the new
+        # window is created by that existing process, which never sees the switch (measured: the switch
+        # is read by the process that creates the window, and a forwarded launch has no such switch).
+        # So the born geometry is decided ONLY by --window-size / --window-position.
+        # Target = the work area (taskbar kept), i.e. exactly what MaximizeSmart verifies against
+        # below, so the later SW_MAXIMIZE only pushes the invisible resize border off-screen
+        # (measured 7 DIP px) and there is no visible jump.
+        # Units: Chromium reads --window-size in DIP (logical) pixels. This process never sets a DPI
+        # awareness context (only the splash child does), so WinForms already reports the work area in
+        # that same virtualized space -- measured 1463,866 here, vs 2560,1516 physical at 175%.
+        $bornSize = ''
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+            $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            if ($wa -and $wa.Width -gt 200 -and $wa.Height -gt 200) {
+                $bornSize = ('' + $wa.Width + ',' + $wa.Height)
+            }
+        } catch {}
+        if ($bornSize -ne '') {
+            $appArgs = @('--app=' + $openUrl, '--window-position=0,0', '--window-size=' + $bornSize, '--start-maximized')
+        } else {
+            # No display / WinForms unavailable: fall back to the plain round-45 behaviour.
+            $appArgs = @('--app=' + $openUrl, '--start-maximized')
+        }
     }
     $edgeProc = $null
     $opened = $false
@@ -310,9 +419,11 @@ try {
         # Win32 helper: maximize the app window owned by our PID; if Chrome
         # delegated to an already-running instance (our process exits right
         # away), fall back to matching the window by its page title instead.
-        # Compiled AFTER launching the browser so csc runs in parallel with
-        # Chrome's own startup instead of delaying it.
-        Add-Type -TypeDefinition @'
+        # Round 45: still compiled AFTER launching the browser (so the browser's own startup
+        # is not delayed), but now through Get-CachedType -- only the very first run on a
+        # machine pays the ~1.0s csc compile, later runs load a prebuilt assembly (~0.05s),
+        # which also means the force-maximize below runs ~1s sooner than before.
+        $typeMode = Get-CachedType -CacheTag 'winmax-launch' -TypeName 'WinMax' -Source @'
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -377,15 +488,19 @@ public class WinMax {
     }
     public static int MaximizeSmart(uint pid, string titlePart, string procNames, int maxRetries, int intervalMs) {
         for (int i = 0; i < maxRetries; i++) {
-            if (ProcAlive(pid)) {
-                int c = MaximizeByPid(pid);
-                if (c > 0) return c;
-            } else {
-                // Chrome delegated to an already-running instance: our PID will
-                // never own the new window, so match it by page title instead.
-                int c = MaximizeByTitle(titlePart, procNames);
-                if (c > 0) return c;
-            }
+            // Round 46b (2026-09-25): try BOTH branches every round instead of gating the title
+            // branch on ProcAlive(pid)==false. Measured reasoning: when the browser is already
+            // running, our launch process delegates and then LINGERS for a while; during that time
+            // MaximizeByPid finds nothing (the new window belongs to the long-lived browser process,
+            // not to us) and the title branch never ran, so the window stayed small until the
+            // launcher exited -- the "opens small, then jumps to full screen" the user reported.
+            // Running the title branch immediately is a strict superset of the old behaviour: it
+            // only adds attempts in cases where nothing was attempted before, and a title match is
+            // by definition a window of the target page (the pid branch is still tried first).
+            int c = 0;
+            if (ProcAlive(pid)) c = MaximizeByPid(pid);
+            if (c == 0) c = MaximizeByTitle(titlePart, procNames);
+            if (c > 0) return c;
             Thread.Sleep(intervalMs);
         }
         return 0;
@@ -398,7 +513,14 @@ public class WinMax {
             # Expected page title (built from char codes to keep this file pure ASCII).
             $titleCodes = @(0x4E2A, 0x4EBA, 0x8F7B, 0x91CF, 0x5DE5, 0x4F5C, 0x53F0)
             $expectedTitle = -join ($titleCodes | ForEach-Object { [char]$_ })
-            [WinMax]::MaximizeSmart([uint32]$edgeProc.Id, $expectedTitle, 'chrome;msedge', 25, 200) | Out-Null
+            # Wrapped: the browser window is ALREADY up at this point, so a helper failure
+            # (type unavailable) must never surface as "workbench failed to start".
+            # Round 46b: cadence tightened from (25, 200ms) to (60, 60ms) -- the window is checked
+            # roughly every 60ms instead of every 200ms, so the maximize lands right after the window
+            # exists instead of up to 200ms later (same 3.6s overall budget as the old 5s).
+            try {
+                [WinMax]::MaximizeSmart([uint32]$edgeProc.Id, $expectedTitle, 'chrome;msedge', 60, 60) | Out-Null
+            } catch {}
         }
     }
 }

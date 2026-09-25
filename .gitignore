@@ -18,6 +18,14 @@ bridge2.txt
 
 # project memory / local state
 .workbuddy/
+# 「窗口模式（每次最大化 / 记住上次尺寸）」的落盘偏好：是**本机运行期状态**，
+# 由桥写、由启动脚本读，不该进仓库（第 45 轮补）
+window-pref.json
+
+# 第 46c 轮：scripts/win-max.exe 是**由 scripts/win-max-src.cs 编译出来的产物**
+# （桥启动时按 sha1 自动重编），不进仓库；sidecar 只是给桥做哈希比较用的
+scripts/win-max.exe
+scripts/win-max.exe.sha1
 
 # logs
 *.log

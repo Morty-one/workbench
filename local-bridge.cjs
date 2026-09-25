@@ -11,6 +11,7 @@ const { exec, spawn, execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
+const crypto = require('crypto')
 
 const PORT = process.env.WB_BRIDGE_PORT || 4567
 const LOG = process.env.WB_BRIDGE_LOG || path.join(__dirname, 'local-bridge.log')
@@ -60,14 +61,143 @@ function resolveBrowser(exe) {
   try { return fs.existsSync(p) ? p : '' } catch (e) { return '' }
 }
 
-// 用指定的浏览器 exe 打开目标（网页链接或本地文件都适用）
-function launchBrowser(exe, target, res, origin) {
-  const cmd = `cmd /c start "" ${quoteCmdArg(exe)} ${quoteCmdArg(target)}`
-  log('LAUNCH_BROWSER', cmd)
-  exec(cmd, { windowsHide: true }, (err) => {
-    if (err) { log('BROWSER_FAIL', err.message); sendJson(res, 500, { ok: false, error: err.message }, origin); return }
-    sendJson(res, 200, { ok: true, browser: exe }, origin)
+/* ---------- 第 45 轮：从工作台点开的链接也要遵守「窗口模式」 ---------- */
+// 为什么不能只给启动命令加 --start-maximized：浏览器**已经在运行**时，新窗口/标签是由
+// 已有进程创建的，命令行开关不会作用到它。2026-09-25 实测：
+// `chrome.exe --start-maximized <url>`（浏览器已运行）连新窗口都没建，也没最大化。
+// 所以必须走 Win32 ShowWindow —— 见 scripts/win-max.ps1。
+function winMaxScriptPath() { return path.join(__dirname, 'scripts', 'win-max.ps1') }
+function winMaxExePath() { return path.join(__dirname, 'scripts', 'win-max.exe') }
+function winMaxSrcPath() { return path.join(__dirname, 'scripts', 'win-max-src.cs') }
+function winMaxSidecarPath() { return path.join(__dirname, 'scripts', 'win-max.exe.sha1') }
+function winMaxBuildScriptPath() { return path.join(__dirname, 'scripts', 'build-win-max.ps1') }
+function winMaxLogPath() { return path.join(__dirname, 'win-max.log') }
+
+/* ---------- 第 46c 轮：监视器改用**原生 exe**（ps1 降级为兜底） ----------
+ * 背景：监视器必须在打开链接**之前**起来（顺序反了就分不清"本来就有的窗口"和"这次新开的"），
+ * 所以它的启动开销直接压在用户的那一次点击上。2026-09-25 同一台机、同一条命令行实测：
+ *     powershell.exe -NoProfile -ExecutionPolicy Bypass -File win-max.ps1 ...  = 1733 ms
+ *     win-max.exe --mode list ...                                               =   95 ms
+ * 差 1.6 秒，而 PowerShell 那 1.6 秒跟"最大化"逻辑半点关系都没有，纯粹是它自己启动。
+ * exe 与 ps1 的日志契约**逐字一致**（见 scripts/win-max-src.cs 顶部注释），所以桥、测试、
+ * 取证脚本都不用改口径；ps1 仍然保留：没有 csc / exe 被杀软删掉的机器照样能最大化，只是慢。
+ */
+function winMaxImpl() {
+  try { return fs.existsSync(winMaxExePath()) ? 'exe' : 'ps1' } catch (e) { return 'ps1' }
+}
+
+// 源码改了才重编（哈希放 sidecar 文件）。**哈希比较放在 node 里做** —— 别为了"检查是否最新"
+// 去起 PowerShell：实测那个检查走 PS 要 1383 ms，而 node 读文件算 sha1 是 1 ms 级。
+// 失败一律静默降级到 ps1，绝不因为它影响"打开链接"。
+let exeBuildBusy = false
+function ensureWinMaxExe() {
+  if (exeBuildBusy) return
+  // 仅供自动化测试：验证「exe 缺失 ⇒ 回落 ps1」时必须关掉自愈重编，否则测到一半 exe 就被修好了
+  if (process.env.WB_NO_WINMAX_BUILD === '1') { log('WINMAX_EXE_BUILD_SKIPPED', 'WB_NO_WINMAX_BUILD=1'); return }
+  let want = ''
+  try { want = crypto.createHash('sha1').update(fs.readFileSync(winMaxSrcPath())).digest('hex') } catch (e) { return }
+  let have = ''
+  try { have = String(fs.readFileSync(winMaxSidecarPath(), 'utf8')).trim() } catch (e) {}
+  try { if (have === want && fs.existsSync(winMaxExePath())) return } catch (e) { return }
+  if (!fs.existsSync(winMaxBuildScriptPath())) { log('WINMAX_EXE_NO_BUILDER', winMaxBuildScriptPath()); return }
+  exeBuildBusy = true
+  log('WINMAX_EXE_BUILD_START', 'want=' + want.slice(0, 12) + ' have=' + (have ? have.slice(0, 12) : '(none)'))
+  try {
+    // 不 detached（第 45 轮实测：detached + windowsHide 下 powershell.exe 会静默起不来）。
+    // stdio:'ignore' + unref() 已经够"不挡启动"，编译这几秒本身也在后台。
+    const c = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', winMaxBuildScriptPath()],
+      { windowsHide: true, stdio: 'ignore' })
+    c.on('exit', (code) => { log('WINMAX_EXE_BUILD_DONE', 'exit=' + code + ' impl=' + winMaxImpl()) })
+    c.on('error', (e) => { log('WINMAX_EXE_BUILD_FAIL', e.message) })
+    c.unref()
+  } catch (e) {
+    log('WINMAX_EXE_BUILD_FAIL', e.message)
+  }
+}
+
+// 先把 watch 起来（并等它写完窗口快照），调用方随后才启动浏览器。顺序反了就分不清
+// 「本来就有的窗口」和「这次新开的窗口」。watch 只负责最大化，**不负责启动**。
+function spawnWindowWatch(exe) {
+  const ps1 = winMaxScriptPath()
+  const impl = winMaxImpl()
+  const implPath = impl === 'exe' ? winMaxExePath() : ps1
+  if (!fs.existsSync(implPath)) { log('WINMAX_MISSING', implPath); return null }
+  const procName = path.basename(String(exe || '')).replace(/\.exe$/i, '').toLowerCase()
+  if (!procName) { log('WINMAX_NO_PROC', String(exe || '')); return null }
+  const tag = Date.now() + '-' + Math.floor(Math.random() * 1000000)
+  const lf = winMaxLogPath()
+  log('WINMAX_SPAWN', 'tag=' + tag + ' proc=' + procName + ' impl=' + impl)
+  try {
+    // ⚠️ 绝不能加 detached:true —— 2026-09-25 实测（四种组合对照）：
+    // detached+windowsHide 下 powershell.exe 静默起不来（不写任何日志、stdout/stderr 全空），
+    // 只有「不 detached」才是活的。stdio:'ignore' 已经够了（watch 最多活 8 秒）。
+    const child = impl === 'exe'
+      ? spawn(implPath, ['--mode', 'watch', '--proc', procName, '--tag', tag, '--logfile', lf],
+        { windowsHide: true, stdio: 'ignore' })
+      : spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1,
+        '-Mode', 'watch', '-Proc', procName, '-Tag', tag, '-LogFile', lf],
+        { windowsHide: true, stdio: 'ignore' })
+    // exe 起不来（被杀软删了、被占用了）时**再给 ps1 一次机会**：这里只降级、不报错。
+    child.on('error', (e) => {
+      log('WINMAX_SPAWN_FAIL', 'impl=' + impl + ' ' + e.message)
+      if (impl === 'exe' && fs.existsSync(ps1)) {
+        try {
+          const alt = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1,
+            '-Mode', 'watch', '-Proc', procName, '-Tag', tag, '-LogFile', lf], { windowsHide: true, stdio: 'ignore' })
+          log('WINMAX_SPAWN_RETRY', 'fallback=ps1 tag=' + tag)
+          alt.unref()
+        } catch (e2) { log('WINMAX_SPAWN_RETRY_FAIL', e2.message) }
+      }
+    })
+    child.unref()
+  } catch (e) { log('WINMAX_SPAWN_FAIL', 'impl=' + impl + ' ' + e.message); return null }
+  return { tag, lf }
+}
+
+// 等就绪标记（`TAG=<tag> SNAP`）；**超时也照样放行** —— 绝不允许「等最大化」把「打开链接」卡住。
+function waitWindowWatchReady(w, timeoutMs) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs
+    const tick = () => {
+      let text = ''
+      try { text = fs.readFileSync(w.lf, 'utf8') } catch (e) { text = '' }
+      if (text.indexOf('TAG=' + w.tag + ' SNAP') >= 0) { log('WINMAX_READY', 'tag=' + w.tag); resolve(true); return }
+      if (Date.now() >= deadline) { log('WINMAX_SNAP_TIMEOUT', 'tag=' + w.tag); resolve(false); return }
+      setTimeout(tick, 60)
+    }
+    tick()
   })
+}
+
+// 用指定的浏览器 exe 打开目标（网页链接或本地文件都适用）
+//
+// ⚠️ 必须 spawn + stdio:'ignore' + 立刻回 200，**不能用 exec 等回调**：
+// 2026-09-25 实测 exec 会挂 >10 秒才回调 —— 新起的浏览器进程继承了 cmd 的 stdout 管道，
+// 管道不关 exec 就不回调（与 doc-output 那条链踩过的是同一个坑）。表现就是「点了链接
+// 半天没反应，于是又点一次」：桥日志里同一个 kdocs 链接 5 秒内被点了两次，正是这个原因。
+// 也不再经 cmd /c start：直接 spawn 目标 exe，URL 里的 & 等字符不经 shell 反而更安全。
+function launchBrowser(exe, target, res, origin) {
+  const doLaunch = (extra) => {
+    log('LAUNCH_BROWSER', 'spawn ' + quoteCmdArg(exe) + ' ' + quoteCmdArg(target))
+    try {
+      const child = spawn(exe, [target], { windowsHide: true, stdio: 'ignore' })
+      child.on('error', (e) => log('BROWSER_FAIL', e.message))
+      child.unref()
+    } catch (e) {
+      log('BROWSER_FAIL', e.message)
+      sendJson(res, 500, { ok: false, error: e.message }, origin)
+      return
+    }
+    sendJson(res, 200, Object.assign({ ok: true, browser: exe }, extra || {}), origin)
+  }
+  // 只有「每次最大化」档才去找新窗口；「记住上次尺寸」档必须什么都不做。
+  if (readWindowPref().mode !== 'maximized') { doLaunch(); return }
+  const w = spawnWindowWatch(exe)
+  if (!w) { doLaunch(); return }
+  // 3500ms 而不是 2000ms：ps1 里的 Add-Type 是**运行期编译 C#**，冷启动实测要 ~2s，
+  // 2000ms 会卡在边界上误判超时（2026-09-25 第 4 次回归就撞到：请求 2071ms 返回
+  // maximized:false，可日志里 SNAP/MAXED 其实都写了）。超时本身仍然放行，只是不再误报。
+  waitWindowWatchReady(w, 3500).then((ready) => doLaunch(ready ? { maximized: true } : { maximized: false }))
 }
 
 function normalizeTarget(raw) {
@@ -318,7 +448,16 @@ function handleOpen(payload, res, origin) {
 // 为什么存在这里而不是 localStorage：launch-workbench.ps1 要在**启动浏览器之前**决定
 // 用哪些参数，而脚本运行时网页还没起来 ⇒ 只能由网页把选择写给桥、桥落盘成 json，
 // 下次重开 VBS 时脚本读取。所以这条设置天然是「下次启动生效」，UI 上必须写清楚。
-function windowPrefPath() { return path.join(__dirname, 'window-pref.json') }
+//
+// 测试隔离（第 46d 轮）：桥用环境变量 `WB_WINDOW_PREF` 覆盖这个文件路径。
+// **测试必须把覆盖指向自己的临时文件**，否则会动到用户真实设置 —— 沙箱每轮删文件有配额，
+// unlink 失败会被 try/catch 吞掉 ⇒ 测试能把真实设置**悄悄留在 remember 档**，
+// 等于无声关掉「点开链接就最大化」（2026-09-25 真发生过一次）。
+function windowPrefOverride() {
+  const v = String(process.env.WB_WINDOW_PREF || '').trim()
+  return v ? path.resolve(v) : ''
+}
+function windowPrefPath() { return windowPrefOverride() || path.join(__dirname, 'window-pref.json') }
 const WINDOW_MODES = ['maximized', 'remember']
 
 function readWindowPref() {
@@ -334,12 +473,16 @@ function readWindowPref() {
 function writeWindowPref(payload, res, origin) {
   const mode = String((payload && payload.mode) || '')
   if (WINDOW_MODES.indexOf(mode) < 0) { sendJson(res, 400, { ok: false, error: 'invalid mode' }, origin); return }
+  const file = windowPrefPath()
   try {
-    fs.writeFileSync(windowPrefPath(), JSON.stringify({ mode, updatedAt: new Date().toISOString() }, null, 2))
-    log('WINDOWPREF', 'mode=' + mode)
+    // 覆盖档常指向尚不存在的临时目录（测试的 %TEMP%\…）⇒ 先造目录，
+    // 否则 writeFileSync 抛 ENOENT，看起来像"写入功能坏了"，其实是路径没建。
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ mode, updatedAt: new Date().toISOString() }, null, 2))
+    log('WINDOWPREF', 'mode=' + mode + ' file=' + file + ' src=' + (windowPrefOverride() ? 'env' : 'default'))
     sendJson(res, 200, { ok: true, mode }, origin)
   } catch (e) {
-    log('WINDOWPREF_FAIL', e.message)
+    log('WINDOWPREF_FAIL', e.message + ' file=' + file)
     sendJson(res, 500, { ok: false, error: e.message }, origin)
   }
 }
@@ -591,6 +734,13 @@ server.listen({ port: PORT, host: '127.0.0.1', exclusive: true }, () => {
   try { mtime = fs.statSync(__filename).mtime.toISOString() } catch {}
   log('listening on 127.0.0.1:' + PORT, 'bridge-mtime=' + mtime)
   console.log(`local-bridge listening on 127.0.0.1:${PORT} (mtime ${mtime})`)
+  // 第 46d 轮：把"这次到底读哪个窗口设置文件"写进日志。
+  // 排查「窗口模式怎么不生效」先看这一行：src=env 说明当前是**测试覆盖档**，
+  // 真实 window-pref.json 根本没被读写（测试隔离生效）。
+  log('WINDOWPREF_PATH', 'file=' + windowPrefPath() + ' src=' + (windowPrefOverride() ? 'env' : 'default'))
+  // 第 46c 轮：确保 scripts/win-max.exe 与源码同步（源码改了才重编，平时只是 node 里比一下 sha1）。
+  // 放在 ASR 预加载**之前**，因为下面那个分支会 return，而测试环境（WB_NO_ASR=1）同样需要它。
+  try { ensureWinMaxExe() } catch (e) { log('WINMAX_EXE_ENSURE_FAIL', e.message) }
   // 预加载语音识别模型：后台常驻 python 子进程，首次点击语音不再等待模型加载
   // WB_NO_ASR=1 仅供自动化测试使用（搭桥跑断言时没必要白加载几百 MB 的 whisper 模型）
   if (process.env.WB_NO_ASR === '1') { log('ASR_PRELOAD_SKIPPED', 'WB_NO_ASR=1'); return }
