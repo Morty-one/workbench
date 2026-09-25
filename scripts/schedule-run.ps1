@@ -8,7 +8,7 @@ $proj = Split-Path $PSScriptRoot -Parent
 $bridgeScript = Join-Path $proj 'local-bridge.cjs'
 
 $node = $null
-foreach ($cand in @('C:\Users\morty\.workbuddy\binaries\node\versions\22.22.2\node.exe', 'node')) {
+foreach ($cand in @('C:\Users\morty\.workbuddy\binaries\node\versions\22.22.2-3\node.exe', 'node')) {
   if (Get-Command $cand -ErrorAction SilentlyContinue) { $node = $cand; break }
 }
 if (-not $node) { Write-Host 'node not found'; exit 1 }
