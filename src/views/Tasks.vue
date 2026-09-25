@@ -9,6 +9,8 @@ import { browserForLink } from '../utils/browserPref.js'
 import { docState, requestDocOutput } from '../docoutput.js'
 import { shiftKeyOf } from '../shift'
 import TaskFormModal from '../components/TaskFormModal.vue'
+// 第 44 轮：原生 confirm 全换成应用内对话框
+import { appConfirm } from '../utils/appDialog.js'
 
 const props = defineProps({
   search: { type: String, default: '' },
@@ -513,7 +515,14 @@ async function saveProject() {
   await loadProjects()
 }
 async function deleteProject(p) {
-  if (!confirm(`确认删除项目「${p.name}」？其子项目将上提一级，任务保留在原项目。`)) return
+  const ok = await appConfirm({
+    title: '删除项目「' + p.name + '」',
+    message: '其子项目会上提一级（不会跟着被删），项目下的任务也保留在原项目。',
+    warn: '此操作不可恢复。',
+    danger: true,
+    okText: '删除项目'
+  })
+  if (!ok) return
   // 子项目上提一级（父级变为被删项目的父级）
   await db.projects.where('parentId').equals(p.id).modify({ parentId: p.parentId || null })
   await db.projects.delete(p.id)
@@ -867,7 +876,10 @@ function edit(t) {
     })),
     // 完成时间优先用显式存储的 dueTime（未设则为空，重新编辑时不再误判为已设）
     dueTime: t.dueTime || '',
-    remindTime: remindMin > 0 ? minutesToTime(remindMin) : (t.dueTime || defaultDueTime())
+    remindTime: remindMin > 0 ? minutesToTime(remindMin) : (t.dueTime || defaultDueTime()),
+    // 第 43 轮：「是否预设任务自动生成」——只给弹窗判断删除确认文案用。
+    // 弹窗提交时只回传它自己那 7 个字段（localSubmit 里显式列举），所以这个字段**不会**被写回库。
+    autoRuleId: t.autoRuleId || null
   }
   showForm.value = true
 }
@@ -1043,7 +1055,12 @@ function removeFormSubLink(s, i) {
 
 /* ---------- 把任务设为自动化预设 ---------- */
 async function makePreset(t) {
-  if (!confirm(`将任务「${t.title}」设为自动化预设？\n保存后可在「设置中心-预设-自动化」中查看和编辑。`)) return
+  const ok = await appConfirm({
+    title: '设为自动化预设',
+    message: '将任务「' + t.title + '」存成一条每日自动生成的规则。\n保存后可在「设置中心 → 预设 → 自动化」里查看和编辑。',
+    okText: '设为预设'
+  })
+  if (!ok) return
   const rules = (await db.settings.get('periodicDutyTasks'))?.value || []
   // 把任务的 followUpAt 转成 HH:MM（基于创建当天 0 点）
   const created = t.createdAt || Date.now()
@@ -1410,8 +1427,10 @@ onUnmounted(() => {
       :projects="projects"
       :editing-id="editingId"
       :initial-data="formInitial"
+      :auto-generated="!!formInitial.autoRuleId"
       @update:show="showForm = $event"
       @submit="onFormSubmit"
+      @remove="remove"
     />
 
     <!-- 按日程添加项目 -->

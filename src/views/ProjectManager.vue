@@ -7,6 +7,8 @@
 import { ref, computed, watch, onMounted, reactive } from 'vue'
 import { db } from '../db'
 import { shiftKeyOf } from '../shift'
+// 第 44 轮：原生 confirm 换成应用内对话框
+import { appConfirm } from '../utils/appDialog.js'
 
 const props = defineProps({
   tasks: { type: Array, default: () => [] }
@@ -144,15 +146,19 @@ async function remove(p) {
     alert('不能删除全部项目，至少要保留一个。')
     return
   }
-  let msg = `删除项目「${p.name}」？`
-  if (childN > 0) {
-    msg += `\n\n共 ${childN + 1} 个项目（含 ${childN} 个子项目）${
-      taskN > 0 ? `、${taskN} 个任务` : ''
-    }会被一并删除，且无法恢复。`
-  } else if (taskN > 0) {
-    msg += `\n\n该项目下的 ${taskN} 个任务会被一并删除，且无法恢复。`
-  }
-  if (!confirm(msg)) return
+  const detail = []
+  if (childN > 0) detail.push(`含 ${childN} 个子项目（共 ${childN + 1} 个项目）`)
+  if (taskN > 0) detail.push(`${taskN} 个任务`)
+  const ok = await appConfirm({
+    title: `删除项目「${p.name}」`,
+    message: detail.length
+      ? `将被一并删除：${detail.join('、')}。`
+      : '该项目下暂无子项目和任务。',
+    warn: '此操作不可恢复。',
+    danger: true,
+    okText: '删除项目'
+  })
+  if (!ok) return
   await db.transaction('rw', db.projects, db.tasks, async () => {
     await db.tasks.where('projectId').anyOf([...ids]).delete()
     await db.projects.bulkDelete([...ids])

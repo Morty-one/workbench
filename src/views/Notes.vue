@@ -5,6 +5,8 @@ import * as XLSX from 'xlsx'
 import { embedImages, dataURIToBytes, extractImageDataURIs } from '../utils/xlsxImages'
 import { db } from '../db'
 import FolderTree from './FolderTree.vue'
+// 第 44 轮：原生 confirm/prompt 全换成应用内对话框
+import { appConfirm, appPrompt } from '../utils/appDialog.js'
 
 const props = defineProps({
   search: { type: String, default: '' },
@@ -437,8 +439,14 @@ async function moveFolderTo(id, newParentId) {
 async function renameFolder(id) {
   const folder = foldersFlat.value.find((f) => f.id === id)
   if (!folder) return
-  const next = prompt('重命名文件夹', folder.name)
-  if (next == null) return // 取消
+  const next = await appPrompt({
+    title: '重命名文件夹',
+    message: '留空不生效，与原名称相同也不会改动。',
+    value: folder.name,
+    selectOnFocus: true,
+    okText: '重命名'
+  })
+  if (next == null) return // 取消（留空是 ''，不是取消 —— 由下面的空值判断忽略）
   const trimmed = next.trim()
   if (!trimmed || trimmed === folder.name) return
   await db.folders.update(id, { name: trimmed })
@@ -448,10 +456,17 @@ async function removeFolder(id) {
   const children = foldersFlat.value.filter((f) => f.parentId === id)
   const descendantIds = [id, ...collectIds(children)]
   const total = await db.notes.where('folderId').anyOf(descendantIds).count()
-  const msg = total > 0
-    ? `该目录含 ${total} 条笔记（含子目录），删除后这些笔记将变为"未归档"，确认删除？`
-    : '确认删除该文件夹及其子文件夹？'
-  if (!confirm(msg)) return
+  const fname = (foldersFlat.value.find((f) => f.id === id) || {}).name || ''
+  const ok = await appConfirm({
+    title: fname ? '删除文件夹「' + fname + '」' : '删除文件夹',
+    message: total > 0
+      ? `该文件夹及其子文件夹下有 ${total} 条笔记，删除后这些笔记会变成"未归档"（笔记本身不会被删掉）。`
+      : '将删除该文件夹及其所有子文件夹。',
+    warn: '此操作不可恢复。',
+    danger: true,
+    okText: '删除文件夹'
+  })
+  if (!ok) return
   await deleteRecursive(id)
   if (selectedFolder.value && descendantIds.includes(selectedFolder.value)) {
     selectedFolder.value = null
@@ -503,10 +518,16 @@ async function removeFoldersBatch() {
     descendantIds.forEach((d) => allIds.add(d))
   }
   const totalNotes = await db.notes.where('folderId').anyOf([...allIds]).count()
-  const msg = totalNotes > 0
-    ? `将删除 ${allIds.size} 个文件夹（含子目录），其中 ${totalNotes} 条笔记将变为"未归档"，确认？`
-    : `确认删除 ${allIds.size} 个文件夹（含子目录）？`
-  if (!confirm(msg)) return
+  const ok = await appConfirm({
+    title: `删除选中的 ${selectedBatchIds.value.length} 个文件夹`,
+    message: totalNotes > 0
+      ? `含子目录共 ${allIds.size} 个文件夹，其下 ${totalNotes} 条笔记会变成"未归档"（笔记本身不会被删掉）。`
+      : `含子目录共 ${allIds.size} 个文件夹，将全部删除。`,
+    warn: '此操作不可恢复。',
+    danger: true,
+    okText: '删除文件夹'
+  })
+  if (!ok) return
   for (const id of allIds) {
     await deleteRecursive(id)
   }
@@ -585,12 +606,6 @@ async function saveNote() {
   showEditor.value = false
   await loadNotes()
 }
-async function removeNote(id) {
-  if (!confirm('确认删除该笔记？')) return
-  await db.notes.delete(id)
-  await loadNotes()
-}
-
 /* ---------- 轻量提示 ---------- */
 const toastMsg = ref('')
 let toastTimer = null
@@ -960,7 +975,13 @@ function onNoteCardCheck(id) {
 }
 async function removeNotesBatch() {
   if (!selectedNoteIds.value.length) return
-  if (!confirm(`确认删除选中的 ${selectedNoteIds.value.length} 条笔记？此操作不可恢复。`)) return
+  const ok = await appConfirm({
+    title: `删除选中的 ${selectedNoteIds.value.length} 条笔记`,
+    warn: '此操作不可恢复。',
+    danger: true,
+    okText: '删除笔记'
+  })
+  if (!ok) return
   for (const id of selectedNoteIds.value) await db.notes.delete(id)
   selectedNoteIds.value = []
   noteSelecting.value = false

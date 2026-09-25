@@ -4,6 +4,8 @@ import * as XLSX from 'xlsx-js-style'
 import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate'
 import { db } from '../db'
 import { getHolidayMap, shiftKeyOf, SHIFT_KEYS } from '../shift'
+// 第 44 轮：原生 confirm 全换成应用内对话框
+import { appConfirm } from '../utils/appDialog.js'
 
 const records = ref([])
 const selMonth = ref(ymd(new Date().getFullYear(), new Date().getMonth(), 1).slice(0, 7)) // 'YYYY-MM'，日历当前月
@@ -475,7 +477,15 @@ async function importExcel(e) {
   }
 }
 async function clearAll() {
-  if (!confirm('将清空全部值班记录，建议先导出备份。确认？')) return
+  const cnt = await db.duty.count()
+  const ok = await appConfirm({
+    title: '清空全部值班记录',
+    message: `将清空全部 ${cnt} 条值班记录。`,
+    warn: '此操作不可恢复，建议先导出备份。',
+    danger: true,
+    okText: '确认清空'
+  })
+  if (!ok) return
   await db.duty.clear()
   await load()
 }
@@ -890,7 +900,16 @@ async function saveRecord() {
 }
 async function deleteRecord(id) {
   if (String(id).startsWith('rest:')) return
-  if (!confirm('确认删除该条排班记录？')) return
+  const rec = records.value.find((r) => r.id === id) || {}
+  const who = [rec.date, rec.person, rec.shift].filter(Boolean).join(' · ')
+  const ok = await appConfirm({
+    title: '删除排班记录',
+    message: who ? '将删除：' + who : '将删除这条排班记录。',
+    warn: '此操作不可恢复。',
+    danger: true,
+    okText: '删除记录'
+  })
+  if (!ok) return
   await db.duty.delete(id)
   await load()
 }
@@ -914,12 +933,28 @@ function toggleClearPerson(p) {
 }
 async function confirmClear() {
   if (clearMode.value === 'all') {
-    if (!confirm('将清空全部值班记录，建议先导出备份。确认？')) return
+    const total = await db.duty.count()
+    const ok = await appConfirm({
+      title: '清空全部值班记录',
+      message: '将清空全部 ' + total + ' 条值班记录。',
+      warn: '此操作不可恢复，建议先导出备份。',
+      danger: true,
+      okText: '确认清空'
+    })
+    if (!ok) return
     await db.duty.clear()
   } else if (clearMode.value === 'person') {
     const list = [...clearSelectedPersons.value]
     if (!list.length) return alert('请至少选择一位人员')
-    if (!confirm(`将清空 ${list.join('、')} 的值班记录，建议先导出备份。确认？`)) return
+    const cnt = await db.duty.where('person').anyOf(list).count()
+    const ok = await appConfirm({
+      title: '清空 ' + list.length + ' 位人员的值班记录',
+      message: '将清空 ' + list.join('、') + ' 的记录，共 ' + cnt + ' 条。',
+      warn: '此操作不可恢复，建议先导出备份。',
+      danger: true,
+      okText: '确认清空'
+    })
+    if (!ok) return
     await db.duty.where('person').anyOf(list).delete()
   } else if (clearMode.value === 'date') {
     const s = clearDateStart.value
@@ -932,7 +967,14 @@ async function confirmClear() {
       closeClearDialog()
       return
     }
-    if (!confirm(`将清空 ${s} 至 ${e} 共 ${hit.length} 条值班记录，建议先导出备份。确认？`)) return
+    const ok = await appConfirm({
+      title: '按日期清空值班记录',
+      message: '将清空 ' + s + ' 至 ' + e + ' 的记录，共 ' + hit.length + ' 条。',
+      warn: '此操作不可恢复，建议先导出备份。',
+      danger: true,
+      okText: '确认清空'
+    })
+    if (!ok) return
     await db.duty.bulkDelete(hit.map((r) => r.id))
   }
   closeClearDialog()

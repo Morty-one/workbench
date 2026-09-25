@@ -10,6 +10,8 @@ import { ensureDefaultProject } from '../seed'
 import { SHIFT_OPTIONS, WEEKDAY_LABELS, weekdayText } from '../shift'
 // 第 42 轮：链接保存前先剥壳，避免把本地路径存成 `https://"C:\…"`（详见 localOpen.js 文件头）
 import { localPathOf } from '../utils/localOpen.js'
+// 第 44 轮：原生 confirm/prompt 全换成应用内对话框
+import { appConfirm, appPrompt } from '../utils/appDialog.js'
 // 第 43 轮：浏览器与打开方式（浏览器清单 / 全局默认 / 窗口模式 / 检测本机浏览器）
 import {
   loadBrowserPrefs, detectBrowsers, pickExePath,
@@ -548,14 +550,24 @@ function refreshPullLogs() {
   pullLogs.value = loadPullLog()
   if (pullLogPage.value > pullLogTotalPages.value) pullLogPage.value = pullLogTotalPages.value
 }
-function clearSyncLogs() {
-  if (!confirm('确定清空全部同步记录？此操作不影响云端与本地数据。')) return
+async function clearSyncLogs() {
+  const ok = await appConfirm({
+    title: '清空同步记录',
+    message: '只清空这份记录列表，云端与本地数据不受影响。',
+    okText: '清空记录'
+  })
+  if (!ok) return
   clearSyncLog()
   refreshSyncLogs()
   showSaveTip('同步记录已清空')
 }
-function clearPullLogs() {
-  if (!confirm('确定清空全部拉取记录？此操作不影响云端与本地数据。')) return
+async function clearPullLogs() {
+  const ok = await appConfirm({
+    title: '清空拉取记录',
+    message: '只清空这份记录列表，云端与本地数据不受影响。',
+    okText: '清空记录'
+  })
+  if (!ok) return
   clearPullLog()
   refreshPullLogs()
   showSaveTip('拉取记录已清空')
@@ -719,13 +731,19 @@ function toggleAutoSync() {
   configureSync(dirHandle, autoSync.value, { encryption: encryptMode.value, password: syncPassword.value })
   if (autoSync.value && dirHandle) flash(encryptMode.value ? '已开启加密实时同步 ✓' : '已开启实时同步 ✓')
 }
-function toggleEncrypt() {
+async function toggleEncrypt() {
   if (!autoSync.value) {
     encryptMode.value = false
     return
   }
   if (encryptMode.value) {
-    const p = prompt('设置同步加密密码（从目录导入时需输入相同密码）：')
+    const p = await appPrompt({
+      title: '设置同步加密密码',
+      message: '从数据目录导入这份备份时，需要输入同一个密码。',
+      password: true,
+      placeholder: '输入密码',
+      okText: '启用加密'
+    })
     if (!p) {
       encryptMode.value = false
       return
@@ -934,14 +952,6 @@ async function saveSettings() {
   } catch (err) {
     console.error('保存设置失败', err)
     showSaveTip('保存失败：' + (err?.message || err), false)
-  }
-}
-async function savePresets() {
-  try {
-    await db.settings.put({ key: 'followUpPresets', value: toPlain(presets.value) })
-  } catch (err) {
-    console.error('保存预设失败', err)
-    alert('保存预设失败：' + (err?.message || err))
   }
 }
 function formatMinutes(m) {
@@ -1263,15 +1273,6 @@ async function delRule(id) {
   await saveSettings()
   showSaveTip('已删除规则', true)
 }
-async function saveNoteTags() {
-  try {
-    await db.settings.put({ key: 'noteTags', value: toPlain(noteTags.value) })
-  } catch (err) {
-    console.error('保存标签预设失败', err)
-    alert('保存标签预设失败：' + (err?.message || err))
-  }
-}
-
 /* ---------- 加密导入导出 ---------- */
 async function collectAll() {
   return {
@@ -1315,7 +1316,13 @@ async function applyData(data) {
   )
 }
 async function exportEncrypted() {
-  const pw = prompt('设置导出密码（导入时需输入相同密码）：')
+  const pw = await appPrompt({
+    title: '设置导出密码',
+    message: '以后从这份加密备份导入时，需要输入同一个密码。',
+    password: true,
+    placeholder: '输入密码',
+    okText: '导出'
+  })
   if (!pw) return
   const data = await collectAll()
   const enc = await encryptData(data, pw)
@@ -1331,7 +1338,13 @@ async function exportEncrypted() {
 async function importEncrypted(e) {
   const file = e.target.files[0]
   if (!file) return
-  const pw = prompt('输入导出时的密码：')
+  const pw = await appPrompt({
+    title: '输入导出时的密码',
+    message: '这份文件是加密备份，输入当初设置导出密码时的那个密码。',
+    password: true,
+    placeholder: '输入密码',
+    okText: '导入'
+  })
   if (!pw) return
   try {
     const payload = JSON.parse(await file.text())
@@ -1362,7 +1375,13 @@ async function chooseDir() {
 }
 async function exportToDir() {
   if (!dirHandle) return alert('请先选择数据目录。')
-  const pw = prompt('设置导出密码：')
+  const pw = await appPrompt({
+    title: '设置导出密码',
+    message: '写入目录的是加密备份，导入时需要输入同一个密码。',
+    password: true,
+    placeholder: '输入密码',
+    okText: '写入目录'
+  })
   if (!pw) return
   try {
     const data = await collectAll()
@@ -1396,7 +1415,13 @@ async function importFromDir() {
         throw new Error('not-plain')
       }
     } catch {
-      const pw = prompt('该文件为加密备份，输入密码：')
+      const pw = await appPrompt({
+        title: '该文件是加密备份',
+        message: '请输入当初设置导出密码时用的那个密码。',
+        password: true,
+        placeholder: '输入密码',
+        okText: '解密导入'
+      })
       if (!pw) return
       data = await decryptData(JSON.parse(text), pw)
     }
@@ -1411,8 +1436,14 @@ function copyDirName() {
 }
 
 async function clearAll() {
-  if (!confirm('将清空全部本地数据（待办/项目/笔记/快捷方式/值班/设置），且不可恢复！建议先导出备份。确认清空？'))
-    return
+  const ok = await appConfirm({
+    title: '清空全部本地数据',
+    message: '将清空：待办、项目、笔记、快捷方式、值班、设置。',
+    warn: '此操作不可恢复，建议先导出备份。',
+    danger: true,
+    okText: '确认清空'
+  })
+  if (!ok) return
   await db.transaction(
     'rw',
     db.tasks,
@@ -1561,8 +1592,15 @@ async function clearAll() {
           </select>
         </div>
         <p class="muted" style="margin-top: 4px">
-          「记住上次尺寸」= 不再向浏览器传固定窗口大小，改由浏览器自己记住这个地址上次的尺寸。
+          「记住上次尺寸」= 不传最大化参数，改由浏览器自己记住这个地址上次的尺寸；
+          「每次最大化」= 启动时就让窗口最大化（保留任务栏）。
           <strong>下次重新打开工作台生效</strong>：窗口由启动脚本打开，脚本运行在网页加载之前。
+        </p>
+        <p class="muted" style="margin-top: 4px">
+          这个选择<strong>也作用于从工作台点开的链接</strong>：单条链接指定了浏览器、或设了「默认用哪个打开网页」的，
+          以及本地文件 / app 链接 —— 选「每次最大化」时它们同样会被开成最大化（保留任务栏），
+          而且这类链接<strong>改完立刻生效</strong>，不用重新打开工作台。
+          没指定浏览器、跟随系统默认的普通网页链接由浏览器自己决定尺寸，不受这里控制。
         </p>
         <p v-if="windowModeTip" :class="windowModeTipErr ? 'err' : 'ok'" style="margin-top: 6px">{{ windowModeTip }}</p>
         <p v-if="linkTip" :class="linkTipErr ? 'err' : 'ok'" style="margin-top: 6px">{{ linkTip }}</p>

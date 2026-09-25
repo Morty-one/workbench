@@ -7,6 +7,8 @@ import Duty from './views/Duty.vue'
 import Data from './views/Data.vue'
 import DocOutput from './views/DocOutput.vue'
 import Review from './views/Review.vue'
+// 第 44 轮：应用内对话框（替代浏览器自带 confirm/prompt）。全局单例 ⇒ 根部只挂一个实例
+import AppDialog from './components/AppDialog.vue'
 import { db } from './db'
 import { notify, requestNotifyPermission } from './notify'
 import { seedIfEmpty, ensureDefaultProject } from './seed'
@@ -871,6 +873,10 @@ function trend(value, prev) {
         </div>
       </div>
     </div>
+
+    <!-- 应用内对话框（第 44 轮）：全局单例，任何视图 `await appConfirm/appPrompt` 都弹在这一层。
+         z-index 高于 .modal-mask，支持「弹窗里再弹二次确认」的嵌套。 -->
+    <AppDialog />
   </div>
 </template>
 
